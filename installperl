@@ -346,6 +346,17 @@ elsif ($Is_Cygwin) { # On Cygwin symlink it to CORE to make Makefile happy
 }
 
 
+# perl5-mt: the kernel runtime adapter headers that perl.h includes
+# (mt_image.h, mt_cap.h and mt_xs.h pull in krt/krt.h, krt/krt_atomic.h and
+# krt/krt_ring.h), so that XS modules build against the installed perl
+mkpath("$installarchlib/CORE/krt");
+push(@corefiles, <krt/krt*.h>);
+
+# perl5-mt: perl.h includes the SIMD dispatch and kernel headers from
+# simd/, so XS modules build against the installed perl with those as well
+mkpath("$installarchlib/CORE/simd");
+push(@corefiles, <simd/*.h>);
+
 foreach my $file (@corefiles) {
     if (copy_if_diff($file,"$installarchlib/CORE/$file")) {
 	if ($file =~ /\.(\Q$so\E|\Q$dlext\E)$/) {

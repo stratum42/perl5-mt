@@ -672,28 +672,82 @@ Perl_SvTRUE_common(pTHX_ SV * sv, const bool sv_2bool_is_fallback)
     return isGV_with_GP(sv);
 }
 
+/* perl5-mt: an immortal SV (SVf_IMMORTAL: a process constant or a member of
+ * the sealed boot image) is shared by every worker thread and its head is
+ * read-only, so its reference count is never written.  The guard is the
+ * branch-free MT_REFCNT_TARGET select (sv.h): an immortal's inc or dec
+ * lands in the per-interpreter sink PL_mt_refcnt_sink instead.  Immortals
+ * carry SvREFCNT_IMMORTAL, so on the dec side they always take the rc > 1
+ * fast path; Perl_sv_free2 keeps an early return as a backstop.
+ *
+ * The select itself is a conditional move written in inline assembly on
+ * the primary targets, because gcc 16 turns both the ?: and the mask form
+ * back into a conditional branch inside libperl (the immortal case is
+ * then a mispredict on every push of PL_sv_undef).  Elsewhere the mask
+ * form is used: it is branch-free by construction unless the compiler
+ * chooses otherwise. */
+
+PERL_STATIC_INLINE U32 *
+Perl_mt_refcnt_select(U32 *own, U32 *sink, U32 immortal_bit)
+{
+#if defined(__GNUC__) && defined(__x86_64__)
+    __asm__("testl %[bit], %[bit]\n\tcmovne %[sink], %[own]"
+            : [own] "+r" (own)
+            : [bit] "r" (immortal_bit), [sink] "r" (sink)
+            : "cc");
+    return own;
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__("cmp %w[bit], #0\n\tcsel %[own], %[sink], %[own], ne"
+            : [own] "+r" (own)
+            : [bit] "r" (immortal_bit), [sink] "r" (sink)
+            : "cc");
+    return own;
+#elif defined(__GNUC__) && defined(__powerpc64__)
+    /* own must not land in r0: isel reads an rA of 0 as the literal 0 */
+    __asm__("cmpwi %[bit], 0\n\tisel %[own], %[own], %[sink], 2"
+            : [own] "+b" (own)
+            : [bit] "r" (immortal_bit), [sink] "r" (sink)
+            : "cr0");
+    return own;
+#else
+    {
+        const Size_t a = (Size_t)own, b = (Size_t)sink;
+        const Size_t m = (Size_t)0 - (Size_t)(immortal_bit >> SVf_IMMORTAL_SHIFT);
+        return (U32 *)(a ^ ((a ^ b) & m));
+    }
+#endif
+}
+
 PERL_STATIC_INLINE SV *
-Perl_SvREFCNT_inc(SV *sv)
+Perl_SvREFCNT_inc(pTHX_ SV *sv)
 {
     if (LIKELY(sv != NULL))
-        SvREFCNT(sv)++;
+        ++*MT_REFCNT_TARGET(sv);
     return sv;
 }
 
 PERL_STATIC_INLINE SV *
-Perl_SvREFCNT_inc_NN(SV *sv)
+Perl_SvREFCNT_inc_NN(pTHX_ SV *sv)
 {
     PERL_ARGS_ASSERT_SVREFCNT_INC_NN;
 
-    SvREFCNT(sv)++;
+    ++*MT_REFCNT_TARGET(sv);
     return sv;
 }
 
 PERL_STATIC_INLINE void
-Perl_SvREFCNT_inc_void(SV *sv)
+Perl_SvREFCNT_inc_void(pTHX_ SV *sv)
 {
     if (LIKELY(sv != NULL))
-        SvREFCNT(sv)++;
+        ++*MT_REFCNT_TARGET(sv);
+}
+
+PERL_STATIC_INLINE void
+Perl_SvREFCNT_inc_void_NN(pTHX_ SV *sv)
+{
+    PERL_ARGS_ASSERT_SVREFCNT_INC_VOID_NN;
+
+    ++*MT_REFCNT_TARGET(sv);
 }
 
 PERL_STATIC_INLINE void
@@ -702,7 +756,7 @@ Perl_SvREFCNT_dec(pTHX_ SV *sv)
     if (LIKELY(sv != NULL)) {
         U32 rc = SvREFCNT(sv);
         if (LIKELY(rc > 1))
-            SvREFCNT(sv) = rc - 1;
+            *MT_REFCNT_TARGET(sv) = rc - 1;
         else
             Perl_sv_free2(aTHX_ sv, rc);
     }
@@ -725,7 +779,7 @@ Perl_SvREFCNT_dec_NN(pTHX_ SV *sv)
     PERL_ARGS_ASSERT_SVREFCNT_DEC_NN;
 
     if (LIKELY(rc > 1))
-        SvREFCNT(sv) = rc - 1;
+        *MT_REFCNT_TARGET(sv) = rc - 1;
     else
         Perl_sv_free2(aTHX_ sv, rc);
 }
@@ -764,16 +818,63 @@ Perl_SvAMAGIC_off(SV *sv)
         HvAMAGIC_off(SvSTASH(SvRV(sv)));
 }
 
+/* perl5-mt: flag writes that are skipped on an immortal (see sv.h) */
+PERL_STATIC_INLINE void
+Perl_SvTEMP_on(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) |= SVs_TEMP;
+}
+
+PERL_STATIC_INLINE void
+Perl_SvTEMP_off(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) &= ~SVs_TEMP;
+}
+
+PERL_STATIC_INLINE void
+Perl_SvFAKE_on(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) |= SVf_FAKE;
+}
+
+PERL_STATIC_INLINE void
+Perl_SvFAKE_off(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) &= ~SVf_FAKE;
+}
+
+PERL_STATIC_INLINE void
+Perl_SvPADTMP_on(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) |= SVs_PADTMP;
+}
+
+PERL_STATIC_INLINE void
+Perl_SvPADTMP_off(SV *sv)
+{
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        SvFLAGS(sv) &= ~SVs_PADTMP;
+}
+
 PERL_STATIC_INLINE U32
 Perl_SvPADSTALE_on(SV *sv)
 {
     assert(!(SvFLAGS(sv) & SVs_PADTMP));
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL))   /* perl5-mt: sealed */
+        return SvFLAGS(sv);
     return SvFLAGS(sv) |= SVs_PADSTALE;
 }
 PERL_STATIC_INLINE U32
 Perl_SvPADSTALE_off(SV *sv)
 {
     assert(!(SvFLAGS(sv) & SVs_PADTMP));
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL))   /* perl5-mt: sealed */
+        return SvFLAGS(sv);
     return SvFLAGS(sv) &= ~SVs_PADSTALE;
 }
 

@@ -1,0 +1,52 @@
+#!/usr/bin/make -f
+# Debian rules for perl5-mt (thin wrapper over Configure / make / make install).
+# Optional env vars:
+#   PERL5_MT_PGO=1      Enable -Dusepgo -Dusehugepagetext and build via make pgo
+#   PERL5_MT_NATIVE=1   Enable -Dusenative
+
+export DH_VERBOSE = 1
+PREFIX := /opt/perl5-mt
+NPROC := $(shell nproc 2>/dev/null || echo 4)
+
+CFG_EXTRA :=
+ifeq ($(PERL5_MT_PGO),1)
+	CFG_EXTRA += -Dusepgo -Dusehugepagetext
+	BUILD_TARGET := pgo
+else
+	CFG_EXTRA += -Doptimize='-O2 -g'
+	BUILD_TARGET := all
+endif
+ifeq ($(PERL5_MT_NATIVE),1)
+	CFG_EXTRA += -Dusenative
+endif
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	./Configure -des -Dusethreads -Ud_thread_local \
+		-Dprefix=$(PREFIX) -Accflags='-std=gnu17' $(CFG_EXTRA)
+
+override_dh_auto_build:
+	$(MAKE) -j$(NPROC) $(BUILD_TARGET)
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	./perl -I. -Ilib t/mt/build_flags.t
+	if [ -d krt ]; then $(MAKE) -C krt test; fi
+	if [ -f t/mt/simd_parity.t ]; then \
+		PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/simd_parity.t; \
+		PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/simd_parity.t; \
+	fi
+	if [ -f t/mt/num_digest.t ]; then \
+		PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/num_digest.t; \
+		PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/num_digest.t; \
+	fi
+endif
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/perl5-mt
+	$(MAKE) pgo-clean || true
+
+override_dh_auto_clean:
+	if [ -f Makefile ]; then $(MAKE) distclean || true; fi

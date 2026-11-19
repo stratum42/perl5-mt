@@ -135,6 +135,11 @@ typedef struct jmpenv JMPENV;
         default: Perl_croak(aTHX_ "panic: unexpected setjmp() result\n"); \
         }								\
         JE_OLD_STACK_HWM_restore(cur_env);                              \
+        /* perl5-mt: back from a longjmp (possibly out of a signal       \
+         * handler, which on x86 leaves the key register reset): the     \
+         * boot image must be readable and unwritable again */           \
+        if (UNLIKELY(cur_env.je_ret != 0 && PL_mt_image_key_armed))      \
+            (void)perl_krt_key_arm(PL_mt_image_key, PERL_KRT_KEY_NOWRITE); \
         PL_top_env = &cur_env;						\
         cur_env.je_mustcatch = FALSE;					\
         cur_env.je_old_delaymagic = PL_delaymagic;			\
@@ -833,8 +838,58 @@ struct block_sub {
     CV *	cv;
     /* Above here is the same for sub and format.  */
     I32		olddepth;
+    I32		paddepth;     /* perl5-mt: pad slot owned by this frame */
     AV  	*savearray;
 };
+
+/* perl5-mt: fiber-safe pad slot acquisition and release.
+ * When fibers exist (PL_mt_fibers != NULL), multiple fibers may enter the
+ * same CV concurrently and exit in non-LIFO order.  Each live PAD (an AV
+ * in PadlistARRAY) is marked with SVs_PADTMP while held by an active frame
+ * (PadBUSY), and cx->blk_sub.paddepth records the slot owned by that frame.
+ * S_mt_vm_save / S_mt_vm_load in mt_fiber.c unwind and reload CvDEPTH across
+ * fiber switches while keeping PadBUSY set on parked frames' pads. */
+#define PadBUSY(pad)      (SvFLAGS(pad) & SVs_PADTMP)
+#define PadBUSY_on(pad)   (SvFLAGS(pad) |= SVs_PADTMP)
+#define PadBUSY_off(pad)  (SvFLAGS(pad) &= ~SVs_PADTMP)
+
+#define MT_PAD_ACQUIRE(cx, cv, padlist, depth) \
+    STMT_START { \
+        if (UNLIKELY(PL_mt_fibers != NULL)) { \
+            I32 mt_d_ = 1; \
+            for (;; mt_d_++) { \
+                PAD *mt_p_; \
+                if (mt_d_ > PadlistMAX(padlist) || !PadlistARRAY(padlist)[mt_d_]) \
+                    Perl_pad_push(aTHX_ (padlist), mt_d_); \
+                mt_p_ = PadlistARRAY(padlist)[mt_d_]; \
+                if (!PadBUSY(mt_p_)) { \
+                    PadBUSY_on(mt_p_); \
+                    CvDEPTH(cv) = mt_d_; \
+                    (depth) = mt_d_; \
+                    break; \
+                } \
+            } \
+        } \
+        else { \
+            if (UNLIKELY(((depth) = ++CvDEPTH(cv)) >= 2)) \
+                Perl_pad_push(aTHX_ (padlist), (depth)); \
+        } \
+        (cx)->blk_sub.paddepth = (depth); \
+    } STMT_END
+
+#define MT_PAD_RELEASE(cx, cv) \
+    STMT_START { \
+        if (UNLIKELY(PL_mt_fibers != NULL && (cx)->blk_sub.paddepth > 0)) { \
+            PADLIST * const mt_pl_ = CvPADLIST(cv); \
+            if (mt_pl_ && (cx)->blk_sub.paddepth <= PadlistMAX(mt_pl_)) { \
+                PAD * const mt_p_ = PadlistARRAY(mt_pl_)[(cx)->blk_sub.paddepth]; \
+                if (mt_p_) \
+                    PadBUSY_off(mt_p_); \
+            } \
+        } \
+        CvDEPTH(cv) = (cx)->blk_sub.olddepth; \
+        (cx)->blk_sub.paddepth = 0; \
+    } STMT_END
 
 
 /* format context */
@@ -1391,11 +1446,16 @@ See L<perlcall/LIGHTWEIGHT CALLBACKS>.
                   PL_stack_sp, PL_savestack_ix);	                \
         cx_pushsub(cx, cv, NULL, 0);                                    \
         SAVEOP();					                \
-        if (!(flags & CXp_SUB_RE_FAKE))                                 \
-            CvDEPTH(cv)++;						\
-        if (CvDEPTH(cv) >= 2)  						\
-            Perl_pad_push(aTHX_ padlist, CvDEPTH(cv));			\
-        PAD_SET_CUR_NOSAVE(padlist, CvDEPTH(cv));			\
+        if (!(flags & CXp_SUB_RE_FAKE)) {                               \
+            I32 mt_depth_;                                              \
+            MT_PAD_ACQUIRE(cx, cv, padlist, mt_depth_);                 \
+            PAD_SET_CUR_NOSAVE(padlist, mt_depth_);                     \
+        }                                                               \
+        else {                                                          \
+            if (CvDEPTH(cv) >= 2)                                       \
+                Perl_pad_push(aTHX_ padlist, CvDEPTH(cv));              \
+            PAD_SET_CUR_NOSAVE(padlist, CvDEPTH(cv));                   \
+        }                                                               \
         multicall_cop = CvSTART(cv);					\
     } STMT_END
 
@@ -1433,11 +1493,16 @@ See L<perlcall/LIGHTWEIGHT CALLBACKS>.
         cx_popsub_common(cx);                                           \
         cx->cx_type = (CXt_SUB|CXp_MULTICALL|flags);                    \
         cx_pushsub(cx, cv, NULL, 0);			                \
-        if (!(flags & CXp_SUB_RE_FAKE))                                 \
-            CvDEPTH(cv)++;						\
-        if (CvDEPTH(cv) >= 2)  						\
-            Perl_pad_push(aTHX_ padlist, CvDEPTH(cv));			\
-        PAD_SET_CUR_NOSAVE(padlist, CvDEPTH(cv));			\
+        if (!(flags & CXp_SUB_RE_FAKE)) {                               \
+            I32 mt_depth_;                                              \
+            MT_PAD_ACQUIRE(cx, cv, padlist, mt_depth_);                 \
+            PAD_SET_CUR_NOSAVE(padlist, mt_depth_);                     \
+        }                                                               \
+        else {                                                          \
+            if (CvDEPTH(cv) >= 2)                                       \
+                Perl_pad_push(aTHX_ padlist, CvDEPTH(cv));              \
+            PAD_SET_CUR_NOSAVE(padlist, CvDEPTH(cv));                   \
+        }                                                               \
         multicall_cop = CvSTART(cv);					\
     } STMT_END
 /*

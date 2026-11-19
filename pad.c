@@ -170,7 +170,7 @@ Perl_set_padlist(CV * cv, PADLIST *padlist){
 #    error unknown pointer size
 #  endif
     assert(!CvISXSUB(cv));
-    ((XPVCV*)MUTABLE_PTR(SvANY(cv)))->xcv_padlist_u.xcv_padlist = padlist;
+    *Perl_CvPADLISTp(cv) = padlist;   /* perl5-mt: per-worker for immortals */
 }
 #endif
 
@@ -233,7 +233,11 @@ Perl_pad_new(pTHX_ int flags)
         AvREIFY_only(a0);
 #endif
 
-        PadnamelistREFCNT(padname = PL_comppad_name)++;
+        /* perl5-mt: the name list of a sub in the sealed boot image is
+         * shared, never counted (a closure cloned in a worker reuses it) */
+        padname = PL_comppad_name;
+        if (!Perl_mt_arena_contains(padname))
+            PadnamelistREFCNT(padname)++;
     }
     else {
         padlist->xpadl_id = PL_padlist_generation++;
@@ -307,6 +311,7 @@ Perl_cv_undef_flags(pTHX_ CV *cv, U32 flags)
                so don't read it more than once, use fake CV so existing macros
                will work, the indirection and CV head struct optimized away*/
     SvANY(&cvbody) = SvANY(cv);
+    SvFLAGS(&cvbody) = SvFLAGS(cv); /* perl5-mt: CvPADLIST looks at them */
 
     PERL_ARGS_ASSERT_CV_UNDEF_FLAGS;
 
@@ -2710,6 +2715,8 @@ void
 Perl_padnamelist_free(pTHX_ PADNAMELIST *pnl)
 {
     PERL_ARGS_ASSERT_PADNAMELIST_FREE;
+    if (Perl_mt_arena_contains(pnl))
+        return;                       /* perl5-mt: part of the sealed image */
     if (!--PadnamelistREFCNT(pnl)) {
         while(PadnamelistMAX(pnl) >= 0)
         {
@@ -2816,7 +2823,8 @@ Perl_newPADNAMEouter(PADNAME *outer)
     PadnamePV(pn) = PadnamePV(outer);
     /* Not PadnameREFCNT(outer), because ‘outer’ may itself close over
        another entry.  The original pad name owns the buffer.  */
-    PadnameREFCNT_inc(PADNAME_FROM_PV(PadnamePV(outer)));
+    if (!Perl_mt_arena_contains(PADNAME_FROM_PV(PadnamePV(outer))))
+        PadnameREFCNT_inc(PADNAME_FROM_PV(PadnamePV(outer)));
     PadnameFLAGS(pn) = PADNAMEf_OUTER;
     if(PadnameIsFIELD(outer)) {
         PadnameFIELDINFO(pn) = PadnameFIELDINFO(outer);
@@ -2831,6 +2839,8 @@ void
 Perl_padname_free(pTHX_ PADNAME *pn)
 {
     PERL_ARGS_ASSERT_PADNAME_FREE;
+    if (Perl_mt_arena_contains(pn))
+        return;                       /* perl5-mt: part of the sealed image */
     if (!--PadnameREFCNT(pn)) {
         if (UNLIKELY(pn == &PL_padname_undef || pn == &PL_padname_const)) {
             PadnameREFCNT(pn) = SvREFCNT_IMMORTAL;

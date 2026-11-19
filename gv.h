@@ -21,27 +21,43 @@ struct gp {
     PERL_BITFIELD32 gp_line:31;	/* line first declared at (for -w) */
     PERL_BITFIELD32 gp_flags:1;
     HEK *	gp_file_hek;	/* file first declared in (for -w) */
+    U32		gp_mt_id;	/* perl5-mt: index of this GP in the boot
+                                 * image; keys the per-worker GP and
+                                 * GvFLAGS tables (assigned at freeze) */
 };
+
+/* perl5-mt: a GV in the sealed boot image keeps its GP (and its GvFLAGS)
+ * in per-worker tables, so that 'our' variables, the method cache and
+ * the IMPORTED/MULTI flags stay worker-private.  GvGP_raw is the field
+ * itself: the template GP of an immortal GV.  The redirect functions live
+ * in mt_worker.c and take no context (they fetch it only on the immortal
+ * path). */
+#define GvGP_raw(gv)	((gv)->sv_u.svu_gp)
 
 #define GvXPVGV(gv)	((XPVGV*)SvANY(gv))
 
 
 #if defined (DEBUGGING) && defined(PERL_USE_GCC_BRACE_GROUPS) && !defined(__INTEL_COMPILER)
 #  define GvGP(gv)							\
-        ((GP *)(*({GV *const _gvgp = (GV *) (gv);				\
+        ((GP *)({GV *const _gvgp = (GV *) (gv);				\
             assert(SvTYPE(_gvgp) == SVt_PVGV || SvTYPE(_gvgp) == SVt_PVLV); \
             assert(isGV_with_GP(_gvgp));				\
-            &((_gvgp)->sv_u.svu_gp);})))
+            UNLIKELY(SvFLAGS(_gvgp) & SVf_IMMORTAL)			\
+                ? Perl_mt_gvgp(_gvgp) : (_gvgp)->sv_u.svu_gp;}))
 #  define GvGP_set(gv,gp)						\
         {GV *const _gvgp = (GV *) (gv);				\
             assert(SvTYPE(_gvgp) == SVt_PVGV || SvTYPE(_gvgp) == SVt_PVLV); \
             assert(isGV_with_GP(_gvgp));				\
-            (_gvgp)->sv_u.svu_gp = (gp); }
+            if (UNLIKELY(SvFLAGS(_gvgp) & SVf_IMMORTAL))		\
+                Perl_mt_gvgp_set(_gvgp, (gp));				\
+            else (_gvgp)->sv_u.svu_gp = (gp); }
 #  define GvFLAGS(gv)							\
         (*({GV *const _gvflags = (GV *) (gv);				\
             assert(SvTYPE(_gvflags) == SVt_PVGV || SvTYPE(_gvflags) == SVt_PVLV); \
             assert(isGV_with_GP(_gvflags));				\
-            &(GvXPVGV(_gvflags)->xpv_cur);}))
+            UNLIKELY(SvFLAGS(_gvflags) & SVf_IMMORTAL)			\
+                ? Perl_mt_gvflags_p(_gvflags)				\
+                : &(GvXPVGV(_gvflags)->xpv_cur);}))
 #  define GvSTASH(gv)							\
         (*({ GV * const _gvstash = (GV *) (gv);				\
             assert(isGV_with_GP(_gvstash));				\
@@ -58,9 +74,14 @@ struct gp {
 #  define GvNAMELEN_get(gv)	({ assert(GvNAME_HEK(gv)); HEK_LEN(GvNAME_HEK(gv)); })
 #  define GvNAMEUTF8(gv)	({ assert(GvNAME_HEK(gv)); HEK_UTF8(GvNAME_HEK(gv)); })
 #else
-#  define GvGP(gv)	(0+(gv)->sv_u.svu_gp)
-#  define GvGP_set(gv,gp)	((gv)->sv_u.svu_gp = (gp))
-#  define GvFLAGS(gv)	(GvXPVGV(gv)->xpv_cur)
+#  define GvGP(gv)	(UNLIKELY(SvFLAGS(gv) & SVf_IMMORTAL)		\
+                            ? Perl_mt_gvgp((GV *)(gv)) : (gv)->sv_u.svu_gp)
+#  define GvGP_set(gv,gp)	(UNLIKELY(SvFLAGS(gv) & SVf_IMMORTAL)	\
+                            ? Perl_mt_gvgp_set((GV *)(gv), (gp))	\
+                            : (void)((gv)->sv_u.svu_gp = (gp)))
+#  define GvFLAGS(gv)	(*(UNLIKELY(SvFLAGS(gv) & SVf_IMMORTAL)		\
+                            ? Perl_mt_gvflags_p((GV *)(gv))		\
+                            : &(GvXPVGV(gv)->xpv_cur)))
 #  define GvSTASH(gv)	(GvXPVGV(gv)->xnv_u.xgv_stash)
 #  define GvNAME_HEK(gv)	(GvXPVGV(gv)->xiv_u.xivu_namehek)
 #  define GvNAME_get(gv)	HEK_KEY(GvNAME_HEK(gv))

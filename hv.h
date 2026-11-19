@@ -151,6 +151,13 @@ struct xpvhv_aux {
 #define HvAUXf_SCAN_STASH   0x1   /* stash is being scanned by gv_check */
 #define HvAUXf_NO_DEREF     0x2   /* @{}, %{} etc (and nomethod) not present */
 #define HvAUXf_IS_CLASS     0x4   /* the package is a 'class' */
+#define HvAUXf_SWISS        0x8   /* hash uses SwissTable storage */
+#define HvAUXf_NO_SWISS     0x10  /* hash must never convert to SwissTable */
+#define HvAUXf_MT_MASK      0xff  /* perl5-mt: the id lives above this */
+
+/* perl5-mt: the restricted-hash rules apply to a read-only hash, unless it
+ * is read-only only because it is frozen (every hash of the boot image is) */
+#define HvRESTRICTED(hv)    (SvREADONLY(hv) && !(SvFLAGS(hv) & SVf_IMMORTAL))
 
 #define HvSTASH_IS_CLASS(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_CLASS)
@@ -281,7 +288,7 @@ C<SV*>.
 #ifndef PERL_CORE
 #  define Nullhv Null(HV*)
 #endif
-#define HvARRAY(hv)	((hv)->sv_u.svu_hash)
+/* HvARRAY is defined below, after HvHasAUX/HvAUX_raw. */
 
 /*
 
@@ -316,7 +323,36 @@ whether it is valid to call C<HvAUX()>.
 
 /* This quite intentionally does no flag checking first. That's your
    responsibility. Use HvHasAUX() first */
-#define HvAUX(hv)       (&(((struct xpvhv_with_aux*)  SvANY(hv))->xhv_aux))
+/* perl5-mt: an HV in the sealed boot image keeps a per-worker copy of its
+ * aux structure (iterator state, mro meta, names), so that iterating a
+ * frozen hash or resolving methods in a frozen stash never writes to the
+ * image.  HvAUX_raw is the structure in the image itself; the id of the
+ * HV in the per-worker tables lives in the high bits of xhv_aux_flags. */
+#define HvAUX_raw(hv)   (&(((struct xpvhv_with_aux*)  SvANY(hv))->xhv_aux))
+#define HvAUX(hv)       (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)           \
+                            ? Perl_mt_hv_aux_nocontext((HV *)(hv))      \
+                            : HvAUX_raw(hv))
+#define HvAUXf_MT_ID_SHIFT  8
+#define HvMT_ID(aux)        ((aux)->xhv_aux_flags >> HvAUXf_MT_ID_SHIFT)
+
+#define HvARRAY_raw(hv) ((MUTABLE_HV(hv))->sv_u.svu_hash)
+#define HvSWISS(hv) \
+    (HvHasAUX(hv) && (HvAUX_raw(hv)->xhv_aux_flags & HvAUXf_SWISS) \
+     && (((uintptr_t)HvARRAY_raw(hv) & (uintptr_t)1) != 0))
+
+struct mt_swiss;
+PERL_CALLCONV HE ***Perl_hv_array_ptr_nocontext(HV *hv);
+PERL_CALLCONV HE **Perl_hv_array(pTHX_ HV *hv);
+
+static inline HE ***
+S_hv_array_lval(HV *hv)
+{
+    if (UNLIKELY(HvSWISS(hv)))
+        return Perl_hv_array_ptr_nocontext(hv);
+    return &hv->sv_u.svu_hash;
+}
+#define HvARRAY(hv) (*S_hv_array_lval(MUTABLE_HV(hv)))
+#define HvARRAY_set(hv, val) (HvARRAY(hv) = (val))
 #define HvRITER(hv)	(*Perl_hv_riter_p(aTHX_ MUTABLE_HV(hv)))
 #define HvEITER(hv)	(*Perl_hv_eiter_p(aTHX_ MUTABLE_HV(hv)))
 #define HvRITER_set(hv,r)	Perl_hv_riter_set(aTHX_ MUTABLE_HV(hv), r)
@@ -690,6 +726,8 @@ instead of a string/length pair, and no precomputed hash.
 #define HV_FETCH_JUST_SV	0x20
 #define HV_DELETE		0x40
 #define HV_FETCH_EMPTY_HE	0x80 /* Leave HeVAL null. */
+#define HV_MT_RAW		0x100 /* perl5-mt: act on the image hash itself,
+                                       * not on its per-worker shadow */
 
 /* Must not conflict with HVhek_UTF8 */
 #define HV_NAME_SETALL		0x02

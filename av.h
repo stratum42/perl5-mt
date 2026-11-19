@@ -75,8 +75,43 @@ If all you need is to look up an array element, then prefer C<av_fetch>.
 #  define Nullav Null(AV*)
 #endif
 
-#define AvARRAY(av)	((av)->sv_u.svu_array)
-#define AvALLOC(av)	((XPVAV*)  SvANY(av))->xav_alloc
+#define AV_PACKED_NONE 0
+#define AV_PACKED_IV   1
+#define AV_PACKED_NV   2
+#define AV_PACKED_U8   3
+
+#define AvARRAY_raw(av) ((MUTABLE_AV(av))->sv_u.svu_array)
+#define AvALLOC_raw(av) (((XPVAV*)SvANY(av))->xav_alloc)
+#define AvPACKED_TYPE(av) \
+    ((SvFLAGS(av) & SVf_PACKED_AV) ? (U8)(uintptr_t)AvARRAY_raw(av) : (U8)AV_PACKED_NONE)
+#define AvPACKED_DATA(av) ((void *)AvALLOC_raw(av))
+
+PERL_CALLCONV SV ***Perl_av_unpack_array_ptr_nocontext(AV *av);
+PERL_CALLCONV SV ***Perl_av_unpack_alloc_ptr_nocontext(AV *av);
+PERL_CALLCONV SV **Perl_av_array(pTHX_ AV *av);
+PERL_CALLCONV void Perl_av_unpack(pTHX_ AV *av);
+PERL_CALLCONV bool Perl_av_pack(pTHX_ AV *av, U8 ptype);
+PERL_CALLCONV AV *Perl_av_new_packed(pTHX_ U8 ptype, SSize_t cap);
+PERL_CALLCONV UV Perl_av_unpack_count(void);
+
+static inline SV ***
+S_av_array_lval(AV *av)
+{
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV))
+        return Perl_av_unpack_array_ptr_nocontext(av);
+    return &av->sv_u.svu_array;
+}
+
+static inline SV ***
+S_av_alloc_lval(AV *av)
+{
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV))
+        return Perl_av_unpack_alloc_ptr_nocontext(av);
+    return &((XPVAV*)SvANY(av))->xav_alloc;
+}
+
+#define AvARRAY(av)	(*S_av_array_lval(MUTABLE_AV(av)))
+#define AvALLOC(av)	(*S_av_alloc_lval(MUTABLE_AV(av)))
 #define AvMAX(av)	((XPVAV*)  SvANY(av))->xav_max
 #define AvFILLp(av)	((XPVAV*)  SvANY(av))->xav_fill
 #define AvARYLEN(av)	(*Perl_av_arylen_p(aTHX_ MUTABLE_AV(av)))

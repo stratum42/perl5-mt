@@ -48,6 +48,10 @@
     PERL_UNUSED_RESULT(Gconvert((NV)(nv), (int)ndig, 0, buffer))
 #endif
 
+#include "core-math/mt_nan.h"
+extern int Perl_mt_nv_shortest_enabled(void);
+extern size_t Perl_mt_nv_ryu_format(double nv, char *buf, size_t size);
+
 #ifndef SV_COW_THRESHOLD
 #    define SV_COW_THRESHOLD                    0   /* COW iff len > K */
 #endif
@@ -971,6 +975,10 @@ Perl_sv_upgrade(pTHX_ SV *const sv, svtype new_type)
 
     if (old_type == new_type)
         return;
+
+    /* perl5-mt: an immortal head is read-only */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL))
+        Perl_croak_mt(aTHX_ MT_IMMORTAL_MUTATION);
 
     /* This clause was purposefully added ahead of the early return above to
        the shared string hackery for (sort {$a <=> $b} keys %hash), with the
@@ -2356,6 +2364,14 @@ Perl_sv_2iv_flags(pTHX_ SV *const sv, const I32 flags)
 {
     PERL_ARGS_ASSERT_SV_2IV_FLAGS;
 
+    /* perl5-mt: never cache a conversion in an immortal */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL) && !SvIMMORTAL_INTERP(sv)
+        && sv != &PL_sv_placeholder && !SvIOKp(sv)) {
+        SV * const tmp = sv_newmortal();
+        sv_setsv_flags(tmp, sv, SV_NOSTEAL);
+        return sv_2iv_flags(tmp, flags & ~SV_GMAGIC);
+    }
+
     assert (SvTYPE(sv) != SVt_PVAV && SvTYPE(sv) != SVt_PVHV
          && SvTYPE(sv) != SVt_PVFM);
 
@@ -2454,6 +2470,14 @@ Perl_sv_2uv_flags(pTHX_ SV *const sv, const I32 flags)
 {
     PERL_ARGS_ASSERT_SV_2UV_FLAGS;
 
+    /* perl5-mt: never cache a conversion in an immortal */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL) && !SvIMMORTAL_INTERP(sv)
+        && sv != &PL_sv_placeholder && !SvIOKp(sv)) {
+        SV * const tmp = sv_newmortal();
+        sv_setsv_flags(tmp, sv, SV_NOSTEAL);
+        return sv_2uv_flags(tmp, flags & ~SV_GMAGIC);
+    }
+
     if (SvGMAGICAL(sv) && (flags & SV_GMAGIC))
         mg_get(sv);
 
@@ -2536,6 +2560,14 @@ NV
 Perl_sv_2nv_flags(pTHX_ SV *const sv, const I32 flags)
 {
     PERL_ARGS_ASSERT_SV_2NV_FLAGS;
+
+    /* perl5-mt: never cache a conversion in an immortal */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL) && !SvIMMORTAL_INTERP(sv)
+        && sv != &PL_sv_placeholder && !SvNOKp(sv)) {
+        SV * const tmp = sv_newmortal();
+        sv_setsv_flags(tmp, sv, SV_NOSTEAL);
+        return sv_2nv_flags(tmp, flags & ~SV_GMAGIC);
+    }
 
     assert (SvTYPE(sv) != SVt_PVAV && SvTYPE(sv) != SVt_PVHV
          && SvTYPE(sv) != SVt_PVFM);
@@ -2743,7 +2775,7 @@ Perl_sv_2nv_flags(pTHX_ SV *const sv, const I32 flags)
         RESTORE_LC_NUMERIC();
     });
     CLANG_DIAG_RESTORE_STMT;
-    return SvNVX(sv);
+    return mt_canon_nv(SvNVX(sv));
 }
 
 /*
@@ -2923,6 +2955,18 @@ Perl_sv_2pv_flags(pTHX_ SV *const sv, STRLEN *const lp, const U32 flags)
     bool done_gmagic = FALSE;
 
     PERL_ARGS_ASSERT_SV_2PV_FLAGS;
+
+    /* perl5-mt: a member of the boot image is never written to, not even
+     * to cache a conversion; stringify a mortal copy instead.  The process
+     * constants (PL_sv_undef and friends) keep the upstream path: they are
+     * never converted in place either, and the uninitialized-value
+     * warnings must see the original SV. */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL) && !SvIMMORTAL_INTERP(sv)
+        && sv != &PL_sv_placeholder && !(SvPOKp(sv) && !SvROK(sv))) {
+        SV * const tmp = sv_newmortal();
+        sv_setsv_flags(tmp, sv, SV_NOSTEAL);
+        return sv_2pv_flags(tmp, lp, flags & ~SV_GMAGIC);
+    }
 
     assert (SvTYPE(sv) != SVt_PVAV && SvTYPE(sv) != SVt_PVHV
          && SvTYPE(sv) != SVt_PVFM);
@@ -3141,10 +3185,15 @@ Perl_sv_2pv_flags(pTHX_ SV *const sv, STRLEN *const lp, const U32 flags)
                     5 + /* exponent digits */
                     1 + /* \0 */
                     2; /* paranoia */
+                if (size < 32)
+                    size = 32;
 
                 s = SvGROW_mutable(sv, size);
 #ifndef USE_LOCALE_NUMERIC
-                SNPRINTF_G(SvNVX(sv), s, SvLEN(sv), NV_DIG);
+                if (MT_NV_IS_BINARY64 && Perl_mt_nv_shortest_enabled())
+                    PERL_UNUSED_RESULT(Perl_mt_nv_ryu_format((double)SvNVX(sv), s, SvLEN(sv)));
+                else
+                    SNPRINTF_G(SvNVX(sv), s, SvLEN(sv), NV_DIG);
 
                 SvPOKp_on(sv);
 #else
@@ -3159,7 +3208,10 @@ Perl_sv_2pv_flags(pTHX_ SV *const sv, STRLEN *const lp, const U32 flags)
                         s = SvGROW_mutable(sv, size);
                     }
 
-                    SNPRINTF_G(SvNVX(sv), s, SvLEN(sv), NV_DIG);
+                    if (MT_NV_IS_BINARY64 && !local_radix && Perl_mt_nv_shortest_enabled())
+                        PERL_UNUSED_RESULT(Perl_mt_nv_ryu_format((double)SvNVX(sv), s, SvLEN(sv)));
+                    else
+                        SNPRINTF_G(SvNVX(sv), s, SvLEN(sv), NV_DIG);
 
                     /* If the radix character is UTF-8, and actually is in the
                      * output, turn on the UTF-8 flag for the scalar */
@@ -4295,7 +4347,14 @@ Perl_sv_setsv_flags(pTHX_ SV *dsv, SV* ssv, const I32 flags)
 
 
 
-    SV_CHECK_THINKFIRST_COW_DROP(dsv);
+    /* perl5-mt: a glob of the boot image is read-only, but what a glob
+     * assignment changes is its GP, and in a worker GvGP is the worker's
+     * own (mt_worker.c): the assignment goes ahead */
+    if (UNLIKELY(SvFLAGS(dsv) & SVf_IMMORTAL) && isGV_with_GP(dsv)
+        && PL_mt_gp_table)
+        NOOP;
+    else
+        SV_CHECK_THINKFIRST_COW_DROP(dsv);
     dtype = SvTYPE(dsv); /* THINKFIRST may have changed type */
 
     /* There's a lot of redundancy below but we're going for speed here
@@ -6092,6 +6151,11 @@ Perl_sv_rvweaken(pTHX_ SV *const sv)
     }
     else if (SvREADONLY(sv)) croak_no_modify();
     tsv = SvRV(sv);
+    /* perl5-mt: an immortal target can never be freed, so there is
+     * nothing to weaken; the reference simply stays as it is (its target
+     * was never refcounted either). */
+    if (UNLIKELY(SvFLAGS(tsv) & SVf_IMMORTAL))
+        return sv;
     Perl_sv_add_backref(aTHX_ tsv, sv);
     SvWEAKREF_on(sv);
     SvREFCNT_dec_NN(tsv);
@@ -6209,6 +6273,11 @@ Perl_sv_add_backref(pTHX_ SV *const tsv, SV *const sv)
 
     PERL_ARGS_ASSERT_SV_ADD_BACKREF;
 
+    /* perl5-mt: immortal targets are never freed and their heads are
+     * read-only, so no backref is recorded. */
+    if (UNLIKELY(SvFLAGS(tsv) & SVf_IMMORTAL))
+        return;
+
     /* find slot to store array or singleton backref */
 
     if (SvTYPE(tsv) == SVt_PVHV) {
@@ -6266,6 +6335,10 @@ Perl_sv_del_backref(pTHX_ SV *const tsv, SV *const sv)
     SV **svp = NULL;
 
     PERL_ARGS_ASSERT_SV_DEL_BACKREF;
+
+    /* perl5-mt: nothing was ever recorded on an immortal target */
+    if (UNLIKELY(SvFLAGS(tsv) & SVf_IMMORTAL))
+        return;
 
     if (SvTYPE(tsv) == SVt_PVHV) {
         if (HvHasAUX(tsv))
@@ -7099,12 +7172,15 @@ Perl_sv_clear(pTHX_ SV *const orig_sv)
                 sv_free(sv);
                 continue;
             }
-            if (--(SvREFCNT(sv)))
+            if (--*MT_REFCNT_TARGET(sv))   /* perl5-mt: immortals -> sink */
                 continue;
             if (SvIMMORTAL(sv)) {
-                /* make sure SvREFCNT(sv)==0 happens very seldom */
-                SvREFCNT(sv) = SvREFCNT_IMMORTAL;
-                SvTEMP_off(sv);
+                /* make sure SvREFCNT(sv)==0 happens very seldom.
+                 * perl5-mt: never write to an immortal's head */
+                if (!SvIMMORTAL_MT_RC(sv)) {
+                    SvREFCNT(sv) = SvREFCNT_IMMORTAL;
+                    SvTEMP_off(sv);
+                }
                 continue;
             }
 #ifdef DEBUGGING
@@ -7262,7 +7338,7 @@ Perl_sv_newref(pTHX_ SV *const sv)
 {
     PERL_UNUSED_CONTEXT;
     if (sv)
-        (SvREFCNT(sv))++;
+        ++*MT_REFCNT_TARGET(sv);   /* perl5-mt: immortals -> sink */
     return sv;
 }
 
@@ -7292,6 +7368,11 @@ Perl_sv_free2(pTHX_ SV *const sv, const U32 rc)
 {
 
     PERL_ARGS_ASSERT_SV_FREE2;
+
+    /* perl5-mt: immortals are never freed and their heads are never
+     * written to (they may live in the sealed, read-only boot image). */
+    if (SvIMMORTAL_MT_RC(sv))
+        return;
 
     if (LIKELY( rc == 1 )) {
         /* normal case */
@@ -14166,6 +14247,7 @@ Perl_gp_dup(pTHX_ GP *const gp, CLONE_PARAMS *const param)
     ret->gp_cvgen	= gp->gp_cvgen;
     ret->gp_line	= gp->gp_line;
     ret->gp_file_hek	= hek_dup(gp->gp_file_hek, param);
+    ret->gp_mt_id	= gp->gp_mt_id;	/* perl5-mt */
     return ret;
 }
 
@@ -14596,6 +14678,22 @@ S_sv_dup_common(pTHX_ const SV *const ssv, CLONE_PARAMS *const param)
 
     PERL_ARGS_ASSERT_SV_DUP_COMMON;
 
+    /* perl5-mt: immortals (the process-global constants and the members
+     * of the sealed boot image) are shared by every interpreter in the
+     * process; a clone refers to the very same SVs.  A worker being built
+     * from the image (CLONEf_MT_WORKER) shares only the kinds that stay
+     * read-only in use (code, globs, stashes, regexps: the latter are
+     * copied lazily by PM_GETRE) and copies everything else, so that its
+     * 'our' variables and the data they reach are private to it. */
+    if (SvFLAGS(ssv) & SVf_IMMORTAL) {
+        if (!(param->flags & CLONEf_MT_WORKER)
+            || SvIMMORTAL_INTERP(ssv)
+            || (Perl_mt_sv_is_shared_kind(ssv)
+                && !(SvTYPE(ssv) == SVt_REGEXP
+                     && (param->flags & CLONEf_MT_COPY_RE))))
+            return (SV *)ssv;
+    }
+
     if (SvIS_FREED(ssv)) {
 #ifdef DEBUG_LEAKING_SCALARS_ABORT
         abort();
@@ -14660,6 +14758,9 @@ S_sv_dup_common(pTHX_ const SV *const ssv, CLONE_PARAMS *const param)
     /* clone */
     SvFLAGS(dsv)	= SvFLAGS(ssv);
     SvFLAGS(dsv)	&= ~SVf_OOK;		/* don't propagate OOK hack */
+    /* perl5-mt: a worker's copy of an image SV is ordinary, mutable data */
+    if (UNLIKELY(SvFLAGS(ssv) & SVf_IMMORTAL) && (param->flags & CLONEf_MT_WORKER))
+        SvFLAGS(dsv) &= ~(SVf_IMMORTAL|SVf_READONLY|SVf_PROTECT);
     SvREFCNT(dsv)	= 0;			/* must be before any other dups! */
 
 #ifdef DEBUGGING
@@ -15654,8 +15755,13 @@ perl_clone_using(PerlInterpreter *proto_perl, UV flags,
     PERL_ARGS_ASSERT_PERL_CLONE;
 #endif		/* PERL_IMPLICIT_SYS */
 
-    /* for each stash, determine whether its objects should be cloned */
-    S_visit(proto_perl, do_mark_cloneable_stash, SVt_PVHV, SVTYPEMASK);
+    /* for each stash, determine whether its objects should be cloned.
+     * perl5-mt: not for a worker built on the boot image: the image's
+     * stashes are sealed (they carry the marks made when the image itself
+     * was cloned) and CLONE_SKIP would be looked up in the image's own
+     * context. */
+    if (!(flags & CLONEf_MT_WORKER))
+        S_visit(proto_perl, do_mark_cloneable_stash, SVt_PVHV, SVTYPEMASK);
     my_perl->Iphase = PERL_PHASE_CONSTRUCT;
     PERL_SET_THX(my_perl);
 
@@ -15685,6 +15791,17 @@ perl_clone_using(PerlInterpreter *proto_perl, UV flags,
 #else	/* !DEBUGGING */
     Zero(my_perl, 1, PerlInterpreter);
 #endif	/* DEBUGGING */
+
+    /* perl5-mt: the dispatcher's per-interpreter state is never
+     * inherited by a clone (a worker acquires its own slot and binding) */
+    PL_mt_boot_safe = 0;
+    PL_mt_boot_safe_sym = NULL;
+    PL_mt_boot_pkg = NULL;
+    PL_mt_xs_newxs_log = NULL;
+    PL_mt_xs_slot = -1;
+    PL_mt_xs_comp = -1;
+    PL_mt_hv_amagic = NULL;
+    PL_mt_xs_hh = NULL;
 
 #ifdef PERL_IMPLICIT_SYS
     /* host pointers */
@@ -15841,6 +15958,9 @@ perl_clone_using(PerlInterpreter *proto_perl, UV flags,
     PL_threadhook	= proto_perl->Ithreadhook;
     PL_destroyhook	= proto_perl->Idestroyhook;
     PL_signalhook	= proto_perl->Isignalhook;
+    /* perl5-mt: the tick hook calls the hook it chained, so the
+     * clone needs that one too, or PL_signalhook is a call to NULL */
+    PL_mt_sched_prev_signalhook = proto_perl->Imt_sched_prev_signalhook;
 
     PL_globhook		= proto_perl->Iglobhook;
 
@@ -15927,12 +16047,11 @@ perl_clone_using(PerlInterpreter *proto_perl, UV flags,
     /* create SV map for pointer relocation */
     PL_ptr_table = ptr_table_new();
 
-    /* initialize these special pointers as early as possible */
+    /* initialize these special pointers as early as possible.  perl5-mt:
+     * the four immortals are process globals, so they need no remapping;
+     * init_constants() only sets up the per-interpreter padname constants
+     * on a second call. */
     init_constants();
-    ptr_table_store(PL_ptr_table, &proto_perl->Isv_undef, &PL_sv_undef);
-    ptr_table_store(PL_ptr_table, &proto_perl->Isv_no, &PL_sv_no);
-    ptr_table_store(PL_ptr_table, &proto_perl->Isv_zero, &PL_sv_zero);
-    ptr_table_store(PL_ptr_table, &proto_perl->Isv_yes, &PL_sv_yes);
     ptr_table_store(PL_ptr_table, &proto_perl->Ipadname_const,
                     &PL_padname_const);
 
@@ -16346,6 +16465,15 @@ perl_clone_using(PerlInterpreter *proto_perl, UV flags,
         HV* const stash = MUTABLE_HV(av_shift(param->stashes));
         GV* const cloner = gv_fetchmethod_autoload(stash, "CLONE", 0);
         if (cloner && GvCV(cloner)) {
+            /* perl5-mt: while the boot image is built, remember the stash:
+             * every worker made from the image calls its CLONE again (the
+             * stashes themselves are shared with the workers, so the loop
+             * above never sees them there) */
+            if (PL_mt_arena_mode) {
+                if (!PL_mt_clone_stashes)
+                    PL_mt_clone_stashes = newAV();
+                av_push(PL_mt_clone_stashes, SvREFCNT_inc_simple_NN(MUTABLE_SV(stash)));
+            }
             ENTER;
             SAVETMPS;
             PUSHMARK(PL_stack_sp);
@@ -16485,29 +16613,40 @@ Perl_clone_params_new(PerlInterpreter *const from, PerlInterpreter *const to)
 void
 Perl_init_constants(pTHX)
 {
+    /* perl5-mt: the per-interpreter padname constant first ... */
+    PadnamePV(&PL_padname_const) = (char *)PL_No;
+
+    /* ... then the four immortals, which are process globals with static
+     * bodies (perlvars.h) and are set up exactly once per process. */
+    if (PL_sv_immortals_init)
+        return;
+    PL_sv_immortals_init = 1;
 
     SvREFCNT(&PL_sv_undef)	= SvREFCNT_IMMORTAL;
-    SvFLAGS(&PL_sv_undef)	= SVf_READONLY|SVf_PROTECT|SVt_NULL;
+    SvFLAGS(&PL_sv_undef)	= SVf_READONLY|SVf_PROTECT|SVt_NULL
+                                  |SVf_IMMORTAL;
     SvANY(&PL_sv_undef)		= NULL;
 
-    SvANY(&PL_sv_no)		= new_XPVNV();
+    SvANY(&PL_sv_no)		= &PL_sv_immortal_bodies[0];
     SvREFCNT(&PL_sv_no)		= SvREFCNT_IMMORTAL;
     SvFLAGS(&PL_sv_no)		= SVt_PVNV|SVf_READONLY|SVf_PROTECT
                                   |SVp_IOK|SVf_IOK|SVp_NOK|SVf_NOK
-                                  |SVp_POK|SVf_POK|SVf_IsCOW|SVppv_STATIC;
+                                  |SVp_POK|SVf_POK|SVf_IsCOW|SVppv_STATIC
+                                  |SVf_IMMORTAL;
 
-    SvANY(&PL_sv_yes)		= new_XPVNV();
+    SvANY(&PL_sv_yes)		= &PL_sv_immortal_bodies[1];
     SvREFCNT(&PL_sv_yes)	= SvREFCNT_IMMORTAL;
     SvFLAGS(&PL_sv_yes)		= SVt_PVNV|SVf_READONLY|SVf_PROTECT
                                   |SVp_IOK|SVf_IOK|SVp_NOK|SVf_NOK
-                                  |SVp_POK|SVf_POK|SVf_IsCOW|SVppv_STATIC;
+                                  |SVp_POK|SVf_POK|SVf_IsCOW|SVppv_STATIC
+                                  |SVf_IMMORTAL;
 
-    SvANY(&PL_sv_zero)		= new_XPVNV();
+    SvANY(&PL_sv_zero)		= &PL_sv_immortal_bodies[2];
     SvREFCNT(&PL_sv_zero)	= SvREFCNT_IMMORTAL;
     SvFLAGS(&PL_sv_zero)	= SVt_PVNV|SVf_READONLY|SVf_PROTECT
                                   |SVp_IOK|SVf_IOK|SVp_NOK|SVf_NOK
                                   |SVp_POK|SVf_POK
-                                  |SVs_PADTMP;
+                                  |SVs_PADTMP|SVf_IMMORTAL;
 
     SvPV_set(&PL_sv_no, (char*)PL_No);
     SvCUR_set(&PL_sv_no, 0);
@@ -16526,8 +16665,6 @@ Perl_init_constants(pTHX)
     SvLEN_set(&PL_sv_zero, 0);
     SvIV_set(&PL_sv_zero, 0);
     SvNV_set(&PL_sv_zero, 0);
-
-    PadnamePV(&PL_padname_const) = (char *)PL_No;
 
     assert(SvIMMORTAL_INTERP(&PL_sv_yes));
     assert(SvIMMORTAL_INTERP(&PL_sv_undef));

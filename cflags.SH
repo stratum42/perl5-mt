@@ -195,6 +195,10 @@ Intel*) ;; # # Is that you, Intel C++?
    *" -std="*) ;; # Already have -std=...
    *) warns="-std=c99 $warns" ;;
    esac
+   case " $ccflags " in
+   *" -ffp-contract="*) ;; # Already have -ffp-contract=...
+   *) warns="-ffp-contract=off $warns" ;;
+   esac
    for opt in $warns
     do
        case " $ccflags " in
@@ -217,7 +221,7 @@ Intel*) ;; # # Is that you, Intel C++?
           *) if test -x _cflags$_exe
              then
                case "$opt" in
-               -std*)
+               -std*|-ffp-contract=*)
                  echo "cflags.SH: Adding $opt."
                  stdflags="$stdflags $opt"
                  ;;
@@ -392,14 +396,48 @@ case "$gccversion" in
 ;;
 esac
 
+# Code to set any extra flags here.
+extra=''
+
+# Apply probed native tuning and symbol-binding flags.
+# -ffp-contract=off is already in stdflags and must be preserved;
+# nothing here may imply -ffast-math.
+case "$usenative" in
+define)
+    for f in $native_cflags
+    do
+        case " $ccflags $stdflags $optimize $extra " in
+        *" $f "*) ;;
+        *)
+            echo "cflags.SH: Adding $f because of usenative."
+            extra="$extra $f"
+            ;;
+        esac
+    done
+    ;;
+esac
+
+case "$usesymbolbinding" in
+define)
+    for f in $symbind_cflags
+    do
+        case " $ccflags $stdflags $optimize $extra " in
+        *" $f "*) ;;
+        *)
+            echo "cflags.SH: Adding $f because of usesymbolbinding."
+            extra="$extra $f"
+            ;;
+        esac
+    done
+    ;;
+esac
+
 echo "cflags.SH: cc       = $cc"
 echo "cflags.SH: ccflags  = $ccflags"
 echo "cflags.SH: stdflags = $stdflags"
 echo "cflags.SH: optimize = $optimize"
 echo "cflags.SH: warn     = $warn"
-
-# Code to set any extra flags here.
-extra=''
+echo "cflags.SH: extra    = $extra"
 
 # Protect double or single quotes for better restoring of ccflags.
 myccflags=`echo $ccflags | sed -e 's/"/\\\"/g' -e "s/'/\\\'/g"`
@@ -508,7 +546,41 @@ for file do
     toke) optimize=-O0 ;;
     esac
 
-    echo "$cc -c -DPERL_CORE $ccflags $stdflags $optimize $warn $extra"
+    pgo_extra=''
+    case "$PGO_STAGE" in
+    gen)
+        if test -n "$pgo_gen_flags"; then
+            pgo_extra="$pgo_gen_flags"
+        elif test -n "$PGO_CFLAGS"; then
+            pgo_extra="$PGO_CFLAGS"
+        fi
+        ;;
+    use)
+        if test -n "$pgo_use_flags"; then
+            pgo_extra="$pgo_use_flags $pgo_lto_flags"
+        elif test -n "$PGO_CFLAGS"; then
+            pgo_extra="$PGO_CFLAGS $pgo_lto_flags"
+        fi
+        ;;
+    *)
+        case "$usepgo" in
+        define) pgo_extra="$pgo_lto_flags" ;;
+        esac
+        case "$PGO_CFLAGS" in
+        '') ;;
+        *)  pgo_extra="$pgo_extra $PGO_CFLAGS" ;;
+        esac
+        ;;
+    esac
+
+    case "$pgo_extra" in
+    ''|' '|'  ')
+        echo "$cc -c -DPERL_CORE $ccflags $stdflags $optimize $warn $extra"
+        ;;
+    *)
+        echo "$cc -c -DPERL_CORE $ccflags $stdflags $optimize $warn $extra $pgo_extra"
+        ;;
+    esac
 
     . $TOP/config.sh
 

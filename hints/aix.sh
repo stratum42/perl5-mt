@@ -94,8 +94,19 @@ cc=${cc:-cc}
 
 ccflags="$ccflags -D_ALL_SOURCE -D_ANSI_C_SOURCE -D_POSIX_SOURCE"
 case "$cc" in
-    *gcc*|*g++*) ;;
-    *) ccflags="$ccflags -qmaxmem=-1 -qnoansialias -qlanglvl=extc99" ;;
+    *gcc*|*g++*)
+	case "$ccflags" in
+	    *-std=*) ;;
+	    *) ccflags="$ccflags -std=gnu11" ;;
+	    esac
+	;;
+    *ibm-clang*|*xlclang*)
+	case "$ccflags" in
+	    *-std=*) ;;
+	    *) ccflags="$ccflags -std=gnu11" ;;
+	    esac
+	;;
+    *) ccflags="$ccflags -qmaxmem=-1 -qnoansialias -qlanglvl=extc1x" ;;
     esac
 nm_opt='-B'
 
@@ -500,6 +511,10 @@ case "$PASE" in
 	case "$prefix" in
 	    '') prefix=/QOpenSys/perl ;;
 	    esac
+	case "$ccflags" in
+	    *-D__PASE__*) ;;
+	    *) ccflags="$ccflags -D__PASE__" ;;
+	    esac
 	cat >&4 <<EOF
 
 ***
@@ -699,5 +714,17 @@ case "$osvers" in
         ccflags="$ccflags -DHAS_BROKEN_SETLOCALE_QUERY_LC_ALL"
     ;;
 esac
+
+# perl5-mt requires POSIX threads and 64-bit XCOFF/C11 atomics on AIX/PASE.
+case "$usethreads" in
+    '') usethreads="$define" ;;
+    esac
+case "$use64bitall" in
+    '')
+	if test "X$OBJECT_MODE" = "X64"; then
+	    use64bitall="$define"
+	fi
+	;;
+    esac
 
 # EOF

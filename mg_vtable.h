@@ -36,6 +36,7 @@
 #define PERL_MAGIC_nkeys          'k' /* scalar(keys()) lvalue */
 #define PERL_MAGIC_dbfile         'L' /* Debugger %_<filename */
 #define PERL_MAGIC_dbline         'l' /* Debugger %_<filename element */
+#define PERL_MAGIC_mt_cap         'M' /* perl5-mt capability handle */
 #define PERL_MAGIC_shared         'N' /* Shared between threads */
 #define PERL_MAGIC_shared_scalar  'n' /* Shared between threads */
 #define PERL_MAGIC_collxfrm       'o' /* Locale transformation */
@@ -83,6 +84,7 @@ enum {		/* pass one of these to get_vtbl */
     want_vtbl_isaelem,
     want_vtbl_lvref,
     want_vtbl_mglob,
+    want_vtbl_mt_cap,
     want_vtbl_nkeys,
     want_vtbl_nonelem,
     want_vtbl_ovrld,
@@ -124,6 +126,7 @@ EXTCONST char * const PL_magic_vtable_names[magic_vtable_max] = {
     "isaelem",
     "lvref",
     "mglob",
+    "mt_cap",
     "nkeys",
     "nonelem",
     "ovrld",
@@ -188,6 +191,7 @@ EXT_MGVTBL PL_magic_vtables[magic_vtable_max] = {
   { 0, Perl_magic_setisa, 0, 0, 0, 0, 0, 0 },
   { 0, Perl_magic_setlvref, 0, 0, 0, 0, 0, 0 },
   { 0, Perl_magic_setmglob, 0, 0, Perl_magic_freemglob, 0, 0, 0 },
+  { 0, 0, 0, 0, Perl_magic_freemtcap, 0, Perl_magic_dupmtcap, 0 },
   { Perl_magic_getnkeys, Perl_magic_setnkeys, 0, 0, 0, 0, 0, 0 },
   { 0, Perl_magic_setnonelem, 0, 0, 0, 0, 0, 0 },
   { 0, 0, 0, 0, Perl_magic_freeovrld, 0, 0, 0 },
@@ -234,6 +238,7 @@ EXT_MGVTBL PL_magic_vtables[magic_vtable_max];
 #define PL_vtbl_isaelem PL_magic_vtables[want_vtbl_isaelem]
 #define PL_vtbl_lvref PL_magic_vtables[want_vtbl_lvref]
 #define PL_vtbl_mglob PL_magic_vtables[want_vtbl_mglob]
+#define PL_vtbl_mt_cap PL_magic_vtables[want_vtbl_mt_cap]
 #define PL_vtbl_nkeys PL_magic_vtables[want_vtbl_nkeys]
 #define PL_vtbl_nonelem PL_magic_vtables[want_vtbl_nonelem]
 #define PL_vtbl_ovrld PL_magic_vtables[want_vtbl_ovrld]

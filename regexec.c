@@ -632,6 +632,12 @@ S_find_span_end(U8 * s, const U8 * send, const U8 span_byte)
 
     assert(send >= s);
 
+    /* perl5-mt: long runs go to the SIMD kernel (simd/perl_simd_regex.h) */
+    if (PERL_SIMD_ON() && (STRLEN) (send - s) >= PERL_SIMD_MIN_LEN) {
+        return s + PERL_SIMD_DISPATCH(perl_simd_span_byte, (const U8 *) s,
+                                      (STRLEN) (send - s), span_byte);
+    }
+
     if ((STRLEN) (send - s) >= PERL_WORDSIZE
                           + PERL_WORDSIZE * PERL_IS_SUBWORD_ADDR(s)
                           - (PTR2nat(s) & PERL_WORD_BOUNDARY_MASK))
@@ -707,6 +713,12 @@ S_find_next_masked(U8 * s, const U8 * send, const U8 byte, const U8 mask)
 
     assert(send >= s);
     assert((byte & mask) == byte);
+
+    /* perl5-mt: long runs go to the SIMD kernel */
+    if (PERL_SIMD_ON() && (STRLEN) (send - s) >= PERL_SIMD_MIN_LEN) {
+        return s + PERL_SIMD_DISPATCH(perl_simd_find_masked, (const U8 *) s,
+                                      (STRLEN) (send - s), byte, mask);
+    }
 
 #ifndef EBCDIC
 
@@ -786,6 +798,12 @@ S_find_span_end_mask(U8 * s, const U8 * send, const U8 span_byte, const U8 mask)
 
     assert(send >= s);
     assert((span_byte & mask) == span_byte);
+
+    /* perl5-mt: long runs go to the SIMD kernel */
+    if (PERL_SIMD_ON() && (STRLEN) (send - s) >= PERL_SIMD_MIN_LEN) {
+        return s + PERL_SIMD_DISPATCH(perl_simd_span_mask, (const U8 *) s,
+                                      (STRLEN) (send - s), span_byte, mask);
+    }
 
     if ((STRLEN) (send - s) >= PERL_WORDSIZE
                           + PERL_WORDSIZE * PERL_IS_SUBWORD_ADDR(s)
@@ -2338,7 +2356,21 @@ S_find_byclass(pTHX_ regexp * prog, const regnode *c, char *s,
             /* We know that s is in the bitmap range since the target isn't
              * UTF-8, so what happens for out-of-range values is not relevant,
              * so exclude that from the flags */
-            REXEC_FBC_NON_UTF8_CLASS_SCAN(ANYOF_BITMAP_TEST(c, *((U8*)s)));
+
+            /* perl5-mt: the SIMD bitmap scan skips to the next byte
+             * in the class, which is what the scan below would do one byte at
+             * a time */
+            if (PERL_SIMD_ON() && (STRLEN) (strend - s) >= PERL_SIMD_MIN_LEN) {
+                REXEC_FBC_NON_UTF8_FIND_NEXT_SCAN(s
+                        + PERL_SIMD_DISPATCH(perl_simd_anyof_scan,
+                                             (const U8 *) s,
+                                             (STRLEN) (strend - s),
+                                             (const U8 *) ANYOF_BITMAP(c),
+                                             TRUE));
+            }
+            else {
+                REXEC_FBC_NON_UTF8_CLASS_SCAN(ANYOF_BITMAP_TEST(c, *((U8*)s)));
+            }
         }
         else {
             REXEC_FBC_NON_UTF8_CLASS_SCAN(reginclass(prog,c, (U8*)s, (U8*)s+1,
@@ -2461,8 +2493,21 @@ S_find_byclass(pTHX_ regexp * prog, const regnode *c, char *s,
 
       case ANYOFR_tb_pb:
       case ANYOFR_tb_p8:
-        REXEC_FBC_NON_UTF8_CLASS_SCAN(withinCOUNT((U8) *s,
+        /* perl5-mt: a single range; exact in bytes when it ends at
+         * or below 255, and then the SIMD range scan finds the next byte in it */
+        if (PERL_SIMD_ON() && (STRLEN) (strend - s) >= PERL_SIMD_MIN_LEN
+            && ANYOFRbase(c) + ANYOFRdelta(c) <= 255)
+        {
+            REXEC_FBC_NON_UTF8_FIND_NEXT_SCAN(s
+                    + PERL_SIMD_DISPATCH(perl_simd_find_range, (const U8 *) s,
+                                         (STRLEN) (strend - s),
+                                         (U8) ANYOFRbase(c),
+                                         (U8) ANYOFRdelta(c)));
+        }
+        else {
+            REXEC_FBC_NON_UTF8_CLASS_SCAN(withinCOUNT((U8) *s,
                                             ANYOFRbase(c), ANYOFRdelta(c)));
+        }
         break;
 
       case ANYOFR_t8_pb:
@@ -2477,8 +2522,19 @@ S_find_byclass(pTHX_ regexp * prog, const regnode *c, char *s,
 
       case ANYOFRb_tb_pb:
       case ANYOFRb_tb_p8:
-        REXEC_FBC_NON_UTF8_CLASS_SCAN(withinCOUNT((U8) *s,
+        if (PERL_SIMD_ON() && (STRLEN) (strend - s) >= PERL_SIMD_MIN_LEN
+            && ANYOFRbase(c) + ANYOFRdelta(c) <= 255)
+        {
+            REXEC_FBC_NON_UTF8_FIND_NEXT_SCAN(s
+                    + PERL_SIMD_DISPATCH(perl_simd_find_range, (const U8 *) s,
+                                         (STRLEN) (strend - s),
+                                         (U8) ANYOFRbase(c),
+                                         (U8) ANYOFRdelta(c)));
+        }
+        else {
+            REXEC_FBC_NON_UTF8_CLASS_SCAN(withinCOUNT((U8) *s,
                                             ANYOFRbase(c), ANYOFRdelta(c)));
+        }
         break;
 
       case ANYOFRb_t8_pb:
@@ -10508,6 +10564,13 @@ S_regrepeat(pTHX_ regexp *prog, char **startposp, const regnode *p,
                    && reginclass(prog, p, (U8*)scan, (U8*)scan+1, 0))
                 scan++;
         }
+        else if (PERL_SIMD_ON() && (STRLEN) (this_eol - scan) >= PERL_SIMD_MIN_LEN) {
+            /* perl5-mt: the run ends at the first byte not in the
+             * class, which the SIMD bitmap scan finds */
+            scan += PERL_SIMD_DISPATCH(perl_simd_anyof_scan, (const U8 *) scan,
+                                       (STRLEN) (this_eol - scan),
+                                       (const U8 *) ANYOF_BITMAP(p), FALSE);
+        }
         else {
             while (scan < this_eol && ANYOF_BITMAP_TEST(p, *((U8*)scan)))
                 scan++;
@@ -10642,6 +10705,20 @@ S_regrepeat(pTHX_ regexp *prog, char **startposp, const regnode *p,
         break;
 
       case ANYOFR_tb:
+        /* perl5-mt: the SIMD range span; for a non-UTF-8 target
+         * this_eol already ends at max, so the span cannot pass it */
+        if (PERL_SIMD_ON() && (STRLEN) (this_eol - scan) >= PERL_SIMD_MIN_LEN
+            && ANYOFRbase(p) + ANYOFRdelta(p) <= 255)
+        {
+            const STRLEN n = PERL_SIMD_DISPATCH(perl_simd_span_range,
+                                                (const U8 *) scan,
+                                                (STRLEN) (this_eol - scan),
+                                                (U8) ANYOFRbase(p),
+                                                (U8) ANYOFRdelta(p));
+            scan += n;
+            hardcount += n;
+            break;
+        }
         while (   hardcount < max
                && scan < this_eol
                && withinCOUNT((U8) *scan, ANYOFRbase(p), ANYOFRdelta(p)))
@@ -10666,6 +10743,18 @@ S_regrepeat(pTHX_ regexp *prog, char **startposp, const regnode *p,
         break;
 
       case ANYOFRb_tb:
+        if (PERL_SIMD_ON() && (STRLEN) (this_eol - scan) >= PERL_SIMD_MIN_LEN
+            && ANYOFRbase(p) + ANYOFRdelta(p) <= 255)
+        {
+            const STRLEN n = PERL_SIMD_DISPATCH(perl_simd_span_range,
+                                                (const U8 *) scan,
+                                                (STRLEN) (this_eol - scan),
+                                                (U8) ANYOFRbase(p),
+                                                (U8) ANYOFRdelta(p));
+            scan += n;
+            hardcount += n;
+            break;
+        }
         while (   hardcount < max
                && scan < this_eol
                && withinCOUNT((U8) *scan, ANYOFRbase(p), ANYOFRdelta(p)))

@@ -723,6 +723,7 @@ ARdp	|int	|block_start	|int full
 p	|void	|boot_core_builtin
 : Only used in perl.c
 p	|void	|boot_core_mro
+p	|void	|boot_core_mt
 : Used in perl.c
 p	|void	|boot_core_PerlIO
 : Used in perl.c
@@ -854,6 +855,10 @@ Adfprv	|void	|croak		|NULLOK const char *pat 		\
 Tfprv	|void	|croak_caller	|NULLOK const char *pat 		\
 				|...
 CTrs	|void	|croak_memory_wrap
+: perl5-mt
+Adpr	|void	|croak_mt	|int code
+ATdpr	|void	|croak_mt_nocontext					\
+				|int code
 Tpr	|void	|croak_no_mem
 Tpr	|void	|croak_no_mem_ext					\
 				|NN const char *context 		\
@@ -906,6 +911,7 @@ Xp	|void	|cvgv_set	|NN CV *cv				\
 Adp	|SV *	|cv_name	|NN CV *cv				\
 				|NULLOK SV *sv				\
 				|U32 flags
+AMTdip	|PADLIST **|CvPADLISTp	|NN const CV * const cv
 Adp	|void	|cv_set_call_checker					\
 				|NN CV *cv				\
 				|NN Perl_call_checker ckfun		\
@@ -1191,6 +1197,7 @@ Adfpv	|char * |form		|NN const char *pat			\
 : Only used in perl.c
 p	|void	|free_tied_hv_pool
 Cp	|void	|free_tmps
+Adp	|void	|freeze_boot_image
 ERXp	|SV *	|get_and_check_backslash_N_name 			\
 				|NN const char *s			\
 				|NN const char *e			\
@@ -1820,6 +1827,8 @@ p	|int	|magic_copycallchecker					\
 				|NULLOK const char *name		\
 				|I32 namlen
 Adp	|void	|magic_dump	|NULLOK const MAGIC *mg
+p	|int	|magic_dupmtcap |NN MAGIC *mg				\
+				|NN CLONE_PARAMS *param
 p	|int	|magic_existspack					\
 				|NN SV *sv				\
 				|NN const MAGIC *mg
@@ -1830,6 +1839,8 @@ dp	|int	|magic_freedestruct					\
 				|NN SV *sv				\
 				|NN MAGIC *mg
 p	|int	|magic_freemglob|NN SV *sv				\
+				|NN MAGIC *mg
+p	|int	|magic_freemtcap|NN SV *sv				\
 				|NN MAGIC *mg
 p	|int	|magic_freeovrld|NN SV *sv				\
 				|NN MAGIC *mg
@@ -2031,6 +2042,253 @@ Adhop	|SV *	|mro_set_private_data					\
 				|NN const struct mro_alg * const which	\
 				|NN SV * const data
 CRTip	|unsigned|msbit_pos32	|U32 word
+: perl5-mt: the :async layer and the aio ring (perlio_async.c)
+p	|void	|mt_aio_destroy
+p	|void	|mt_aio_drain_completions				\
+				|NULLOK int *woke
+p	|void	|mt_aio_reset
+p	|IV	|mt_aio_run	|NN perl_krt_sqe_t *q
+: perl5-mt: the freeze arena and the boot image (mt_freeze.c)
+Tp	|void * |mt_arena_alloc |size_t size
+Tp	|bool	|mt_arena_contains					\
+				|NN const void *p
+p	|int	|mt_arena_create|size_t size
+Tp	|size_t |mt_arena_size	|NN const void *p
+: perl5-mt: capabilities (mt_cap.c) and the value marshalling
+p	|void	|mt_boot_cap
+p	|void	|mt_boot_chan
+: perl5-mt: fibers (mt_fiber.c)
+p	|void	|mt_boot_fiber
+p	|void	|mt_boot_io
+p	|void	|mt_boot_worker
+: perl5-mt: the two-tier XS dispatcher (mt_xs_bridge.c,
+: mt_xs_compartment.c)
+p	|void	|mt_boot_xs
+Adp	|U32	|mt_cap_count	|NN SV *handle
+Adp	|void	|mt_cap_drop	|NN SV *handle
+Adp	|SV *	|mt_cap_get	|NN SV *handle
+Adp	|SV *	|mt_cap_handle_new					\
+				|U32 slot				\
+				|U32 gen
+p	|void	|mt_cap_init
+Adp	|bool	|mt_cap_is_handle					\
+				|NN SV *sv
+Adp	|SV *	|mt_cap_mint	|NN SV *value
+Adp	|U32	|mt_cap_reap
+Adp	|void	|mt_cap_share	|NN SV *handle				\
+				|NN U32 *slot				\
+				|NN U32 *gen
+p	|SV *	|mt_cap_stats
+p	|void	|mt_cap_worker_exit
+p	|void	|mt_cap_worker_start
+p	|void	|mt_chan_drain	|NULLOK int *woke
+p	|void	|mt_chan_idle_wait
+: perl5-mt: the fiber context switch (mt_worker.c)
+Tp	|int	|mt_ctx_shstk_active
+: perl5-mt: per-worker CV depth and padlists (mt_worker.c)
+CTXp	|I32 *	|mt_cv_depth_p	|NN const CV *cv
+ATdp	|bool	|mt_cv_shareable|NN const CV *cv
+ATdp	|const char *|mt_err_msg|int code
+ATdp	|const char *|mt_err_name					\
+				|int code
+p	|void	|mt_fiber_destroy
+p	|void	|mt_fiber_init
+p	|void	|mt_fiber_resume|NN struct mt_fiber *fiber
+p	|void	|mt_fiber_yield
+p	|GP *	|mt_gp_materialize					\
+				|NN GV *gv
+p	|void	|mt_gp_release	|NN GP *gp
+CTXp	|STRLEN *|mt_gvflags_p	|NN GV *gv
+: perl5-mt: GP indirection, HV aux copies and shadows, regexps
+CTXp	|GP *	|mt_gvgp	|NN GV *gv
+CTXp	|void	|mt_gvgp_set	|NN GV *gv				\
+				|NULLOK GP *gp
+p	|GV *	|mt_gv_init_private					\
+				|NN HV *stash				\
+				|NN SV *slot				\
+				|NN const char *name			\
+				|STRLEN len				\
+				|U32 flags
+CTXp	|bool	|mt_hv_amagic_nocontext 				\
+				|NN const HV *hv
+CTXp	|void	|mt_hv_amagic_set_nocontext				\
+				|NN HV *hv				\
+				|U8 state
+p	|struct xpvhv_aux *|mt_hv_aux					\
+				|NN HV *hv
+CTXp	|struct xpvhv_aux *|mt_hv_aux_nocontext 			\
+				|NN HV *hv
+p	|void * |mt_hv_common_immortal					\
+				|NN HV *hv				\
+				|NULLOK SV *keysv			\
+				|NULLOK const char *key 		\
+				|STRLEN klen				\
+				|int flags				\
+				|int action				\
+				|NULLOK SV *val 			\
+				|U32 hash
+p	|SV *	|mt_image_stats
+p	|void	|mt_padlist_free|NN PADLIST *padlist
+p	|PADLIST *|mt_padlist_materialize				\
+				|NN const CV *cv
+CTXp	|PADLIST **|mt_padlist_p|NN const CV *cv
+CXp	|REGEXP *|mt_regex_materialize					\
+				|NN PMOP *o
+p	|void	|mt_sched_arm
+p	|void	|mt_sched_idle
+p	|void	|mt_sched_park
+: perl5-mt: the fiber scheduler (mt_fiber.c)
+p	|void	|mt_sched_pass
+p	|void	|mt_sched_poll
+p	|void	|mt_sched_ready |NN struct mt_fiber *fiber
+p	|U32	|mt_sched_run
+p	|void	|mt_sched_wake	|NN struct mt_fiber *fiber
+p	|MAGIC *|mt_stash_amt	|NN HV *stash
+p	|void	|mt_stash_amt_remove					\
+				|NN HV *stash
+p	|void	|mt_stash_amt_set					\
+				|NN HV *stash				\
+				|NN const void *amt			\
+				|STRLEN len
+CTXp	|bool	|mt_sv_is_shared_kind					\
+				|NN const SV *sv
+ATdp	|void	|mt_value_free	|NN perl_mt_value_t *v
+Adp	|void	|mt_value_from_sv					\
+				|NN perl_mt_value_t *v			\
+				|NULLOK SV *sv
+Adp	|SV *	|mt_value_to_sv |NN const perl_mt_value_t *v
+Adp	|SV *	|mt_worker_join |U32 id
+p	|void	|mt_worker_join_all
+Adp	|U32	|mt_worker_spawn|NN SV *name				\
+				|NULLOK SV **args			\
+				|U32 nargs
+p	|void	|mt_worker_tables_free					\
+				|bool svs_gone
+p	|void	|mt_worker_tables_init					\
+				|NN const struct perl_mt_image *img
+p	|void	|mt_worker_tables_release
+p	|bool	|mt_xs_affinity
+p	|void * |mt_xs_arena_alloc					\
+				|U32 slot				\
+				|size_t len				\
+				|NN U64 *off
+p	|void * |mt_xs_arena_at |U32 slot				\
+				|U64 off				\
+				|U64 len
+p	|bool	|mt_xs_arena_full					\
+				|U32 slot
+p	|void	|mt_xs_arena_reset					\
+				|U32 slot
+p	|int	|mt_xs_bell	|NN U32 *doorbell
+p	|int	|mt_xs_bell_changed					\
+				|U32 doorbell
+p	|void	|mt_xs_bell_wait|U32 doorbell				\
+				|uint64_t timeout_ns
+p	|I32	|mt_xs_bind_comp
+p	|void	|mt_xs_boot_bridge
+p	|void	|mt_xs_boot_wrapper					\
+				|NN CV *cv
+p	|bool	|mt_xs_comp_alive					\
+				|U32 comp				\
+				|U32 gen
+p	|U32	|mt_xs_comp_count
+p	|U32	|mt_xs_comp_gen |U32 comp
+p	|void	|mt_xs_comp_serve					\
+				|NN const mt_xs_frame_t *f
+p	|bool	|mt_xs_comp_wait_cb					\
+				|U32 slot				\
+				|U32 depth				\
+				|NN mt_xs_frame_t *out
+Adp	|bool	|mt_xs_dl_find_symbol					\
+				|NULLOK void *libref			\
+				|NN const char *symbolname		\
+				|NN IV *out				\
+				|NN const char **err
+Adp	|void * |mt_xs_dl_lib_new					\
+				|NN void *handle			\
+				|NN const char *path
+Adp	|bool	|mt_xs_dl_unload|NULLOK void *libref
+p	|void	|mt_xs_drain	|NULLOK int *woke
+p	|SV *	|mt_xs_exported_sv					\
+				|U64 ptr
+p	|U64	|mt_xs_export_sv|NN SV *sv				\
+				|bool permanent
+p	|void	|mt_xs_handle_free					\
+				|NN perl_mt_cap_ref_t *ref
+p	|SV *	|mt_xs_handle_new					\
+				|U32 comp				\
+				|U32 gen				\
+				|U64 ptr				\
+				|U8 reftype				\
+				|bool proxy				\
+				|NULLOK const char *rclass		\
+				|STRLEN rclasslen			\
+				|NULLOK const char *blessinto		\
+				|STRLEN blesslen
+p	|perl_mt_cap_ref_t *|mt_xs_handle_ref				\
+				|NN SV *sv
+p	|void	|mt_xs_host_callback					\
+				|U32 comp				\
+				|NN const mt_xs_frame_t *f
+p	|void	|mt_xs_host_handles_free
+p	|void	|mt_xs_host_hrel|NN const mt_xs_frame_t *f
+p	|U32	|mt_xs_in_call_depth					\
+				|U32 slot
+p	|void	|mt_xs_in_call_enter					\
+				|U32 slot
+p	|void	|mt_xs_in_call_leave					\
+				|U32 slot
+Tp	|bool	|mt_xs_in_compartment
+p	|U32	|mt_xs_inflight_max
+p	|CV *	|mt_xs_install_boot					\
+				|NN const char *name			\
+				|NN void *symref			\
+				|NN const char *filename
+p	|void	|mt_xs_install_stub					\
+				|NN const char *name			\
+				|STRLEN len				\
+				|U32 comp				\
+				|U32 gen				\
+				|U64 remote_cv				\
+				|bool reported				\
+				|NULLOK const char *proto		\
+				|STRLEN protolen
+p	|void	|mt_xs_log_newxs|NN CV *cv
+Tp	|U32	|mt_xs_my_comp
+Tp	|U32	|mt_xs_my_gen
+p	|U32	|mt_xs_next_seq |U32 slot
+p	|void	|mt_xs_pool_start
+p	|void	|mt_xs_pool_stop
+p	|void	|mt_xs_post	|U32 comp				\
+				|NN const mt_xs_frame_t *f
+p	|void	|mt_xs_register_xsub					\
+				|NN SV *name				\
+				|NN CV *cv
+p	|void	|mt_xs_remote_call					\
+				|NN CV *cv
+p	|U32	|mt_xs_remote_load					\
+				|NN SV *module				\
+				|NULLOK const char *path		\
+				|U32 flags
+p	|U32	|mt_xs_remote_load_in					\
+				|U32 comp				\
+				|NN SV *module				\
+				|NULLOK const char *path		\
+				|U32 flags
+p	|void	|mt_xs_reply	|NN const mt_xs_frame_t *f
+p	|void	|mt_xs_reply_die_pv					\
+				|NN const mt_xs_frame_t *req		\
+				|NN const char *msg			\
+				|STRLEN len
+p	|U32	|mt_xs_slot
+p	|void	|mt_xs_slot_release
+p	|bool	|mt_xs_slot_waiting					\
+				|U32 slot
+p	|void	|mt_xs_unexport |U64 ptr
+p	|void	|mt_xs_wait	|U32 comp				\
+				|U32 slot				\
+				|U32 seq				\
+				|NN mt_xs_frame_t *out
 EXp	|SV *	|multiconcat_stringify					\
 				|NN const OP *o
 EXp	|SV *	|multideref_stringify					\
@@ -2379,6 +2637,10 @@ ATdp	|OP *	|op_parent	|NN OP *o
 Adp	|OP *	|op_prepend_elem|I32 optype				\
 				|NULLOK OP *first			\
 				|NULLOK OP *last
+: FIXME - can be static.
+eopx	|PADOFFSET|op_refcnt_dec|NN OP *o
+: Used in OpREFCNT_inc() in sv.c
+eopx	|OP *	|op_refcnt_inc	|NULLOK OP *o
 Cdp	|void	|op_refcnt_lock
 Cdp	|void	|op_refcnt_unlock
 Adpx	|OP *	|op_scope	|NULLOK OP *o
@@ -2507,6 +2769,7 @@ Rp	|int	|PerlLIO_open_cloexec					\
 				|NN const char *file			\
 				|int flag
 Ado	|HV *	|Perl_localeconv
+Ado	|U32	|perl_mt_active_workers
 ATdo	|int	|perl_parse	|NN PerlInterpreter *my_perl		\
 				|XSINIT_t xsinit			\
 				|int argc				\
@@ -3011,6 +3274,8 @@ Tp	|Signal_t|sighandler1	|int sig
 Tp	|Signal_t|sighandler3	|int sig				\
 				|NULLOK Siginfo_t *info 		\
 				|NULLOK void *uap
+: perl5-mt: the SIMD level (simd/perl_simd.c)
+p	|void	|simd_detect
 CRTip	|unsigned|single_1bit_pos32					\
 				|U32 word
 ERXpx	|char * |skipspace_flags|NN char *s				\
@@ -3311,10 +3576,12 @@ Adip	|SV *	|SvREFCNT_dec_ret_NULL					\
 				|NULLOK SV *sv
 Adm	|void	|SvREFCNT_dec_set_NULL					\
 				|NULLOK SV *sv
-AMTdip	|SV *	|SvREFCNT_inc	|NULLOK SV *sv
-AMTdip	|SV *	|SvREFCNT_inc_NN|NN SV *sv
-AMTdip	|void	|SvREFCNT_inc_void					\
+AMdip	|SV *	|SvREFCNT_inc	|NULLOK SV *sv
+AMdip	|SV *	|SvREFCNT_inc_NN|NN SV *sv
+AMdip	|void	|SvREFCNT_inc_void					\
 				|NULLOK SV *sv
+AMdip	|void	|SvREFCNT_inc_void_NN					\
+				|NN SV *sv
 ARdp	|const char *|sv_reftype|NN const SV * const sv 		\
 				|const int ob
 Adp	|void	|sv_replace	|NN SV * const sv			\
@@ -3992,11 +4259,9 @@ p	|void	|parser_free_nexttoke_ops				\
 				|NN yy_parser *parser			\
 				|NN OPSLAB *slab
 RTi	|bool	|should_warn_nl |NN const char *pv
-# if defined(PERL_DEBUG_READONLY_OPS)
 ep	|void	|Slab_to_ro	|NN OPSLAB *slab
 ep	|void	|Slab_to_rw	|NN OPSLAB * const slab
-# endif
-#endif /* defined(PERL_CORE) */
+#endif
 #if defined(PERL_CORE) || defined(PERL_EXT)
 ERXdp	|bool	|isSCRIPT_RUN	|NN const U8 *s 			\
 				|NN const U8 *send			\
@@ -4024,12 +4289,6 @@ Adp	|void	|optimize_optree|NN OP *o
 #endif
 #if defined(PERL_DEBUG_READONLY_COW)
 p	|void	|sv_buf_to_ro	|NN SV *sv
-#endif
-#if defined(PERL_DEBUG_READONLY_OPS)
-: FIXME - can be static.
-eopx	|PADOFFSET|op_refcnt_dec|NN OP *o
-: Used in OpREFCNT_inc() in sv.c
-eopx	|OP *	|op_refcnt_inc	|NULLOK OP *o
 #endif
 #if defined(PERL_DEFAULT_DO_EXEC3_IMPLEMENTATION)
 Mp	|bool	|do_exec	|NN const char *cmd
@@ -4167,6 +4426,10 @@ RS	|Size_t |do_trans_invmap|NN SV * const sv			\
 				|NN AV * const map
 RS	|Size_t |do_trans_simple|NN SV * const sv			\
 				|NN const OPtrans_map * const tbl
+S	|bool	|tr_range_of	|NN const OPtrans_map * const tbl	\
+				|NN U8 *lo				\
+				|NN U8 *hi				\
+				|NN U8 *delta
 #endif
 #if defined(PERL_IN_DOOP_C)    || defined(PERL_IN_OP_C)        || \
     defined(PERL_IN_PP_C)      || defined(PERL_IN_REGCOMP_ANY) || \
@@ -6067,6 +6330,10 @@ CTp	|Malloc_t|mem_log_realloc					\
 				|const int linenumber			\
 				|NN const char *funcname
 #endif
+#if defined(PERL_MT_DEBUG_IMMORTAL)
+ATp	|bool	|mt_check_immortal					\
+				|NN const SV *sv
+#endif
 #if !defined(PERL_NO_INLINE_FUNCTIONS)
 Cipx	|void	|cx_popblock	|NN PERL_CONTEXT *cx
 Cipx	|void	|cx_popeval	|NN PERL_CONTEXT *cx
@@ -6193,6 +6460,7 @@ CRdp	|MAGIC *|mg_dup 	|NULLOK MAGIC *mg			\
 p	|struct mro_meta *|mro_meta_dup 				\
 				|NN struct mro_meta *smeta		\
 				|NN CLONE_PARAMS *param
+AMdip	|REGEXP *|mt_pm_getre	|NN const PMOP *o
 ARdp	|OP *	|newPADOP	|I32 type				\
 				|I32 flags				\
 				|NN SV *sv

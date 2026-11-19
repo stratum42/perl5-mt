@@ -1500,6 +1500,7 @@ PerlIO_default_layers(pTHX)
         PerlIO_define_layer(aTHX_ PERLIO_FUNCS_CAST(&PerlIO_remove));
         PerlIO_define_layer(aTHX_ PERLIO_FUNCS_CAST(&PerlIO_byte));
         PerlIO_define_layer(aTHX_ PERLIO_FUNCS_CAST(&PerlIO_scalar));
+        PerlIO_define_layer(aTHX_ PERLIO_FUNCS_CAST(&PerlIO_async));
         PerlIO_list_push(aTHX_ PL_def_layerlist, (PerlIO_funcs *)osLayer,
                          &PL_sv_undef);
         if (s) {

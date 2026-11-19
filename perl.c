@@ -246,8 +246,23 @@ perl_construct(pTHXx)
 
     init_constants();
 
+    /* perl5-mt: the SIMD level, once per process (simd/perl_simd.c) */
+    Perl_simd_detect(aTHX);
+
+    /* perl5-mt: PERL_MT_IMAGE=1 carves the op slabs of this program out of
+     * the freeze arena from the start and freezes the boot image after
+     * the INIT blocks (see mt_freeze.c) */
+    if (!PL_mt_image && !PL_mt_arena.base) {
+        const char * const e = PerlEnv_getenv("PERL_MT_IMAGE");
+        if (e && *e && *e != '0' && Perl_mt_arena_create(aTHX_ 0) == 0) {
+            PL_mt_ops_in_arena = 1;
+            PL_mt_auto_freeze = 1;
+        }
+    }
+
     SvREADONLY_on(&PL_sv_placeholder);
     SvREFCNT(&PL_sv_placeholder) = SvREFCNT_IMMORTAL;
+    SvFLAGS(&PL_sv_placeholder) |= SVf_IMMORTAL;   /* perl5-mt */
 
     PL_sighandlerp  = Perl_sighandler;
     PL_sighandler1p = Perl_sighandler1;
@@ -670,6 +685,11 @@ perl_destruct(pTHXx)
     /* wait for all pseudo-forked children to finish */
     PERL_WAIT_FOR_CHILDREN;
 
+    /* perl5-mt: the main interpreter takes the XS compartments with it
+     * (after END, which may still call into them) */
+    if (PL_mt_worker_id == 0 && !Perl_mt_xs_in_compartment())
+        Perl_mt_xs_pool_stop(aTHX);
+
 
     /* normally when we get here, PL_parser should be null due to having
      * its original (null) value restored by SAVEt_PARSER during leaving
@@ -935,6 +955,10 @@ perl_destruct(pTHXx)
     PL_hook__require__before = NULL;
     SvREFCNT_dec(PL_hook__require__after);
     PL_hook__require__after = NULL;
+
+    /* perl5-mt: the workers still running are joined before the
+     * cleanup below, which at level 0 is not done at all */
+    Perl_mt_worker_join_all(aTHX);
 
     /* call exit list functions */
     while (PL_exitlistlen-- > 0)
@@ -1320,6 +1344,14 @@ perl_destruct(pTHXx)
     /* Now absolutely destruct everything, somehow or other, loops or no. */
 
     /* the 2 is for PL_fdpid and PL_strtab */
+    /* perl5-mt: a worker gives up what its per-worker tables refer to
+     * before the arenas are swept, so that nothing dangles */
+    if (PL_eval_overlay_active)
+        Perl_mt_worker_tables_release(aTHX);
+    /* perl5-mt: fibers still hold SVs and stacklets; they go before the
+     * arenas are swept (a fiber that never finished is not unwound) */
+    Perl_mt_fiber_destroy(aTHX);
+
     while (sv_clean_all() > 2)
         ;
 
@@ -1382,22 +1414,9 @@ perl_destruct(pTHXx)
     PL_ptr_table = (PTR_TBL_t*)NULL;
 #endif
 
-    /* free special SVs */
-
-    SvREFCNT(&PL_sv_yes) = 0;
-    sv_clear(&PL_sv_yes);
-    SvANY(&PL_sv_yes) = NULL;
-    SvFLAGS(&PL_sv_yes) = 0;
-
-    SvREFCNT(&PL_sv_no) = 0;
-    sv_clear(&PL_sv_no);
-    SvANY(&PL_sv_no) = NULL;
-    SvFLAGS(&PL_sv_no) = 0;
-
-    SvREFCNT(&PL_sv_zero) = 0;
-    sv_clear(&PL_sv_zero);
-    SvANY(&PL_sv_zero) = NULL;
-    SvFLAGS(&PL_sv_zero) = 0;
+    /* free special SVs.  perl5-mt: PL_sv_yes/no/zero/undef are process
+     * globals with static bodies and nothing to free; other interpreters
+     * in the process may still be using them, so they are left alone. */
 
     {
         int i;
@@ -1473,13 +1492,6 @@ perl_destruct(pTHXx)
     /* No more IO - including error messages ! */
     PerlIO_cleanup(aTHX);
 #endif
-
-    /* sv_undef needs to stay immortal until after PerlIO_cleanup
-       as currently layers use it rather than NULL as a marker
-       for no arg - and will try and SvREFCNT_dec it.
-     */
-    SvREFCNT(&PL_sv_undef) = 0;
-    SvREADONLY_off(&PL_sv_undef);
 
     Safefree(PL_origfilename);
     PL_origfilename = NULL;
@@ -2574,6 +2586,7 @@ S_parse_body(pTHX_ char **env, XSINIT_t xsinit)
     boot_core_UNIVERSAL();
     boot_core_builtin();
     boot_core_mro();
+    boot_core_mt();		/* perl5-mt: MT::Image, MT::Worker */
     newXS("Internals::V", S_Internals_V, __FILE__);
 
     if (xsinit)
@@ -2839,6 +2852,10 @@ S_run_body(pTHX_ I32 oldscope)
         if (PL_main_root && PL_main_root->op_slabbed)
             Slab_to_ro(OpSLAB(PL_main_root));
 #endif
+        /* perl5-mt: PERL_MT_IMAGE=1 freezes the boot image here, with
+         * everything the BEGIN and INIT blocks built */
+        if (PL_mt_auto_freeze && !PL_mt_image)
+            Perl_freeze_boot_image(aTHX);
     }
 
     /* do it */

@@ -234,7 +234,7 @@ do_test('undef',
 'SV = NULL\\(0x0\\) at $ADDR
   REFCNT = \d+
   FLAGS = \\(READONLY\\)			# $] < 5.021005
-  FLAGS = \\(READONLY,PROTECT\\)		# $] >=5.021005
+  FLAGS = \\(IMMORTAL,READONLY,PROTECT\\)	# $] >=5.021005
 ');
 
 do_test('reference to scalar',
@@ -643,7 +643,7 @@ do_test('blessed reference',
     SV = NULL\\(0x0\\) at $ADDR
       REFCNT = \d+
       FLAGS = \\(READONLY\\)			# $] < 5.021005
-      FLAGS = \\(READONLY,PROTECT\\)		# $] >=5.021005
+      FLAGS = \\(IMMORTAL,READONLY,PROTECT\\)	# $] >=5.021005
     PV = $ADDR ""
     CUR = 0
     LEN = 0

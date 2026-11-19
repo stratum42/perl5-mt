@@ -68,6 +68,9 @@ no_index:
     - ext/Hash-Util/t
     - ext/I18N-Langinfo/t
     - ext/IPC-Open3/t
+    - ext/MT-XSTest-Legacy/t
+    - ext/MT-XSTest/t
+    - ext/MT/t
     - ext/NDBM_File/t
     - ext/ODBM_File/t
     - ext/Opcode/t

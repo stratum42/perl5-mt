@@ -2336,9 +2336,10 @@ Perl_magic_setdbline(pTHX_ SV *sv, MAGIC *mg)
     if (svp && SvIOKp(*svp)) {
         OP * const o = INT2PTR(OP*,SvIVX(*svp));
         if (o) {
-#ifdef PERL_DEBUG_READONLY_OPS
-            Slab_to_rw(OpSLAB(o));
-#endif
+            /* perl5-mt: Slab_to_rw refuses an op of the sealed boot image
+             * (MT_DEBUGGER_UNSUPPORTED) */
+            if (o->op_slabbed && OpSLAB(o)->opslab_readonly)
+                Slab_to_rw(OpSLAB(o));
             /* set or clear breakpoint in the relevant control op */
             if (SvTRUE(sv))
                 o->op_flags |= OPf_SPECIAL;

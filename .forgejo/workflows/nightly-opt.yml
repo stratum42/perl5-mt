@@ -1,0 +1,92 @@
+name: perl5-mt Nightly Optimised CI
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: "Build formula to run (all, pgo-portable, pgo-native)"
+        required: false
+        default: "all"
+
+jobs:
+  optimised:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64-pgo-portable
+            runner: linux-x86_64
+            formula: pgo-portable
+            configure_extra: "-Dusepgo -Dusehugepagetext"
+          - name: linux-amd64-pgo-native
+            runner: linux-x86_64
+            formula: pgo-native
+            configure_extra: "-Dusepgo -Dusenative -Dusehugepagetext"
+          - name: linux-ppc64le-pgo-portable
+            runner: linux-ppc64le
+            formula: pgo-portable
+            configure_extra: "-Dusepgo -Dusehugepagetext"
+          - name: linux-ppc64le-pgo-native
+            runner: linux-ppc64le
+            formula: pgo-native
+            configure_extra: "-Dusepgo -Dusenative -Dusehugepagetext"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.formula == 'all' || inputs.formula == matrix.formula }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (${{ matrix.name }})
+        run: |
+          ./Configure -des -Dusethreads -Ud_thread_local \
+            -Dprefix="$PWD/inst" -Accflags='-std=gnu17' \
+            ${{ matrix.configure_extra }}
+
+      - name: PGO Build (${{ matrix.name }})
+        run: make -j"$(nproc)" pgo
+
+      - name: Verify build flags
+        run: |
+          ./perl -I. -Ilib t/mt/build_flags.t
+
+      - name: krt unit tests
+        run: test -d krt && make -C krt test || echo "krt not present"
+
+      - name: Core test suite (with long t/mt cases)
+        env:
+          PERL_MT_LONG_TESTS: "1"
+        run: TEST_JOBS="$(nproc)" make test_harness
+
+      - name: SIMD parity gate (dual scalar modes)
+        run: |
+          if [ -f t/mt/simd_parity.t ]; then
+            PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/simd_parity.t
+            PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/simd_parity.t
+          fi
+
+      - name: Numeric digest gate (dual scalar modes)
+        run: |
+          if [ -f t/mt/num_digest.t ]; then
+            PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/num_digest.t
+            PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/num_digest.t
+          fi
+
+      - name: Benchmark (${{ matrix.name }})
+        run: |
+          mkdir -p bench-results
+          OUT="bench-results/${{ matrix.name }}.txt"
+          {
+            echo "=== ${{ matrix.name }} ==="
+            uname -a
+            ./perl -V:cc:optimize:ccflags:ldflags:usepgo:usenative:usesymbolbinding:usehugepagetext
+            if [ -x tools/bench/run.sh ] && [ -f tools/bench/mt.pl ]; then
+              sh tools/bench/run.sh ./perl tools/bench/mt.pl 4 2000 5 "$PWD/lib"
+            fi
+            if [ -f tools/simd-bench.pl ]; then
+              ./perl -I. -Ilib tools/simd-bench.pl || true
+            fi
+          } | tee "$OUT"
+
+      - name: Clean PGO profile artifacts
+        if: always()
+        run: make pgo-clean || true

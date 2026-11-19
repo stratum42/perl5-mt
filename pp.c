@@ -31,6 +31,8 @@
 #include "invlist_inline.h"
 #include "reentr.h"
 #include "regcharclass.h"
+#include "core-math/mt_nan.h"
+#include "core-math/cr_libm.h"
 
 /* variations on pp_null */
 
@@ -1308,7 +1310,11 @@ PP(pp_pow)
             TARGn(Perl_pow(left, right), 1 );
 
 #else
-        TARGn(Perl_pow(left, right), 1);
+#  if MT_NV_IS_BINARY64
+        TARGn(mt_canon_nv((NV)cr_pow((double)left, (double)right)), 1);
+#  else
+        TARGn(mt_canon_nv(Perl_pow(left, right)), 1);
+#  endif
 #endif  /* HAS_AIX_POWL_NEG_BASE_BUG */
 
 #ifdef PERL_PRESERVE_IVUV
@@ -1380,7 +1386,7 @@ PP(pp_multiply)
                 Zero((U8*)&result + 8, 8, U8);
             }
 #  endif
-            TARGn(result, 0); /* args not GMG, so can't be tainted */
+            TARGn(mt_canon_nv(result), 0); /* args not GMG, so can't be tainted */
             goto ret;
         }
     }
@@ -1508,7 +1514,7 @@ PP(pp_multiply)
           Zero((U8*)&result + 8, 8, U8);
       }
 #endif
-      TARGn(result, 1);
+      TARGn(mt_canon_nv(result), 1);
       goto ret;
     }
 
@@ -1636,7 +1642,7 @@ PP(pp_divide)
         if (right == 0.0)
 #endif
             DIE(aTHX_ "Illegal division by zero");
-        TARGn(left / right, 1);
+        TARGn(mt_canon_nv(left / right), 1);
         goto ret;               /* redundant, but silence -Wunused-label */
     }
 
@@ -1746,12 +1752,16 @@ PP(pp_modulo)
             if (!dright)
                 DIE(aTHX_ "Illegal modulus zero");
 
+#if MT_NV_IS_BINARY64
+            dans = (NV)cr_fmod((double)dleft, (double)dright);
+#else
             dans = Perl_fmod(dleft, dright);
+#endif
             if ((left_neg != right_neg) && dans)
                 dans = dright - dans;
             if (right_neg)
                 dans = -dans;
-            sv_setnv(TARG, dans);
+            sv_setnv(TARG, mt_canon_nv(dans));
         }
         else {
             UV ans;
@@ -1970,7 +1980,7 @@ PP(pp_subtract)
                 /* nothing was lost by converting to IVs */
                 goto do_iv;
             }
-            TARGn(nl - nr, 0); /* args not GMG, so can't be tainted */
+            TARGn(mt_canon_nv(nl - nr), 0); /* args not GMG, so can't be tainted */
             goto ret;
         }
     }
@@ -2083,10 +2093,10 @@ PP(pp_subtract)
 
         if (!useleft) {
             /* left operand is undef, treat as zero - value */
-            TARGn(-value, 1);
+            TARGn(mt_canon_nv(-value), 1);
             goto ret;
         }
-        TARGn(SvNV_nomg(svl) - value, 1);
+        TARGn(mt_canon_nv(SvNV_nomg(svl) - value), 1);
         goto ret;
     }
 
@@ -2776,11 +2786,11 @@ PP(pp_negate)
 #endif
         }
         if (SvNIOKp(sv) && (SvNIOK(sv) || !SvPOK(sv)))
-            TARGn(-SvNV_nomg(sv), 1);
+            TARGn(mt_canon_nv(-SvNV_nomg(sv)), 1);
         else if (SvPOKp(sv) && SvIV_please_nomg(sv))
                   goto oops_its_an_int;
         else
-            TARGn(-SvNV_nomg(sv), 1);
+            TARGn(mt_canon_nv(-SvNV_nomg(sv)), 1);
     }
 
   ret:
@@ -3144,7 +3154,11 @@ PP(pp_atan2)
     NV right = SvNV_nomg(PL_stack_sp[0]);
     NV left  = SvNV_nomg(PL_stack_sp[-1]);
 
-    TARGn(Perl_atan2(left, right), 1);
+#if MT_NV_IS_BINARY64
+    TARGn(mt_canon_nv((NV)cr_atan2((double)left, (double)right)), 1);
+#else
+    TARGn(mt_canon_nv(Perl_atan2(left, right)), 1);
+#endif
     rpp_replace_2_1_NN(targ);
     return NORMAL;
 }
@@ -3199,13 +3213,21 @@ PP(pp_sin)
       }
       switch (op_type) {
       default:
+#if MT_NV_IS_BINARY64
+      case OP_SIN:  result = (NV)cr_sin((double)value);  break;
+      case OP_COS:  result = (NV)cr_cos((double)value);  break;
+      case OP_EXP:  result = (NV)cr_exp((double)value);  break;
+      case OP_LOG:  result = (NV)cr_log((double)value);  break;
+      case OP_SQRT: result = (NV)cr_sqrt((double)value); break;
+#else
       case OP_SIN:  result = Perl_sin(value);  break;
       case OP_COS:  result = Perl_cos(value);  break;
       case OP_EXP:  result = Perl_exp(value);  break;
       case OP_LOG:  result = Perl_log(value);  break;
       case OP_SQRT: result = Perl_sqrt(value); break;
+#endif
       }
-      TARGn(result, 1);
+      TARGn(mt_canon_nv(result), 1);
       rpp_replace_1_1_NN(TARG);
       return NORMAL;
     }
@@ -3341,7 +3363,7 @@ PP(pp_int)
       else {
           const NV value = SvNV_nomg(sv);
           if (UNLIKELY(Perl_isinfnan(value)))
-              TARGn(value, 1);
+              TARGn(mt_canon_nv(value), 1);
           else if (value >= 0.0) {
               if (value < (NV)UV_MAX + 0.5) {
                   TARGu(U_V(value), 1);
@@ -3398,7 +3420,7 @@ PP(pp_abs)
         TARGu(uv, 1);
       } else{
         const NV value = SvNV_nomg(sv);
-        TARGn(Perl_fabs(value), 1);
+        TARGn(mt_canon_nv(Perl_fabs(value)), 1);
       }
     }
 
@@ -4584,7 +4606,15 @@ PP_wrapped(pp_uc, 1, 0)
             else
 #endif
                  if (! IN_UNI_8_BIT) {
-                for (; s < send; d++, s++) {
+                /* perl5-mt: in this branch toUPPER(c) is c - 'a' + 'A'
+                 * for a-z and c for every other byte (isLOWER_A), so the SIMD
+                 * map is the same loop for any string */
+                if (PERL_SIMD_ON() && len >= PERL_SIMD_MIN_LEN) {
+                    PERL_SIMD_DISPATCH(perl_simd_ascii_toupper, d, s, len);
+                    d += len;
+                    s = send;
+                }
+                else for (; s < send; d++, s++) {
                     *d = toUPPER(*s);
                 }
             }
@@ -4942,7 +4972,13 @@ PP_wrapped(pp_lc, 1, 0)
             else
 #endif
             if (! IN_UNI_8_BIT) {
-                for (; s < send; d++, s++) {
+                /* perl5-mt: as in pp_uc, toLOWER(c) changes only A-Z */
+                if (PERL_SIMD_ON() && len >= PERL_SIMD_MIN_LEN) {
+                    PERL_SIMD_DISPATCH(perl_simd_ascii_tolower, d, s, len);
+                    d += len;
+                    s = send;
+                }
+                else for (; s < send; d++, s++) {
                     *d = toLOWER(*s);
                 }
             }

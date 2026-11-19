@@ -174,6 +174,13 @@ EOT
 		;;
 	esac
 
+	for _f in $symbind_ldflags $hugepage_ldflags; do
+		case " $shrpldflags " in
+		*" $_f "*) ;;
+		*) shrpldflags="$shrpldflags $_f" ;;
+		esac
+	done
+
 	;;
 
 *)	pldlflags=''
@@ -283,6 +290,16 @@ LD = $ld
 LDFLAGS = $ldflags
 CLDFLAGS = $ldflags
 
+# Profile-Guided Optimisation (PGO) and post-link hooks
+PGO_COMPILER = $pgo_compiler
+PGO_GEN_FLAGS = $pgo_gen_flags
+PGO_USE_FLAGS = $pgo_use_flags
+PGO_LTO_FLAGS = $pgo_lto_flags
+PGO_OSNAME = $osname
+PGO_PROF_DIR = pgo-prof
+PGO_ORDER_FILE =
+PGO_TRAIN_ARGS =
+
 mallocsrc = $mallocsrc
 mallocobj = $mallocobj
 LNS = $lns
@@ -377,6 +394,24 @@ RUN_PERL = \$(LDLIBPTH) \$(RUN) ./perl\$(EXE_EXT) -Ilib -I.
 	;;
 esac
 
+accel_libs=''
+case "$osname" in
+darwin*)
+	accel_libs='-framework Accelerate'
+	;;
+linux*|solaris*|aix*)
+	case " $perllibs $cryptlib " in
+	*" -ldl "*) ;;
+	*) accel_libs='-ldl' ;;
+	esac
+	;;
+esac
+
+case "$useshrplib" in
+true) accel_link_obj='' ;;
+*)    accel_link_obj='perl_accel$(OBJ_EXT)' ;;
+esac
+
 $spitshell >>$Makefile <<!GROK!THIS!
 # Macros to run our tests
 RUN_TESTS = \$(LDLIBPTH) ./runtests
@@ -388,7 +423,8 @@ nonxs_ext = $nonxs_list
 ext = \$(dynamic_ext) \$(static_ext) \$(nonxs_ext)
 DYNALOADER = DynaLoader\$(OBJ_EXT)
 
-libs = $perllibs $cryptlib
+libs = $perllibs $cryptlib $accel_libs
+ACCEL_LINK_OBJ = $accel_link_obj
 
 public = \$(PERL_EXE) utilities
 
@@ -530,6 +566,8 @@ unidatadirs = lib/unicore/To lib/unicore/lib
 
 h = \
     EXTERN.h INTERN.h XSUB.h \
+    simd/perl_simd_bytes.h simd/perl_simd_dispatch.h simd/perl_simd_regex.h \
+    simd/perl_simd_utf8.h \
     av.h charclass_invlists.h cop.h cv.h dosish.h embed.h form.h gv.h \
     handy.h hv.h hv_func.h iperlsys.h keywords.h l1_char_class_tab.h \
     mg.h mydtrace.h op.h op_reg_common.h opcode.h pad.h patchlevel.h \
@@ -540,6 +578,13 @@ h = \
 c_base = \
     av.c builtin.c caretx.c class.c deb.c doio.c doop.c dquote.c dump.c \
     globals.c gv.c hv.c keywords.c locale.c mathoms.c mg.c mro_core.c \
+    mt_cap.c mt_ctx_amd64.c mt_ctx_arm64.c mt_ctx_ppc64le.c mt_freeze.c \
+    mt_fiber.c mt_worker.c mt_fault.c mt_partition.c mt_xs_bridge.c mt_xs_compartment.c \
+    perlio_async.c mt_chan.c simd/perl_simd.c \
+    accel/perl_accel.c accel/accel_scalar.c accel/accel_darwin_accelerate.c \
+    accel/accel_metal.c accel/accel_ane.c accel/accel_mesa_opencl.c \
+    accel/accel_intel_npu.c accel/accel_amd_npu.c accel/accel_power_nx.c \
+    accel/accel_s390x_nnpa.c \
     numeric.c op.c pad.c peep.c perl.c perlio.c perly.c \
     pp.c pp_ctl.c pp_hot.c pp_pack.c pp_sort.c pp_sys.c \
     reentr.c regcomp.c regcomp_debug.c regcomp_invlist.c regcomp_study.c \
@@ -576,7 +621,32 @@ common_objs = \
     regexec$(OBJ_EXT) run$(OBJ_EXT) scope$(OBJ_EXT) sv$(OBJ_EXT) \
     taint$(OBJ_EXT) time64$(OBJ_EXT) toke$(OBJ_EXT) utf8$(OBJ_EXT) \
     util$(OBJ_EXT) \
+    $(krt_objs) $(mt_objs) $(accel_objs) \
     $(mallocobj) $(ARCHOBJS)
+
+# perl5-mt native acceleration & transparent offload library (accel/):
+# each backend is self-gated so all translation units compile on every host.
+accel_hdrs = accel/perl_accel.h accel/accel_internal.h
+accel_objs = perl_accel$(OBJ_EXT) accel_scalar$(OBJ_EXT) \
+    accel_darwin_accelerate$(OBJ_EXT) accel_metal$(OBJ_EXT) \
+    accel_ane$(OBJ_EXT) accel_mesa_opencl$(OBJ_EXT) \
+    accel_intel_npu$(OBJ_EXT) accel_amd_npu$(OBJ_EXT) \
+    accel_power_nx$(OBJ_EXT) accel_s390x_nnpa$(OBJ_EXT)
+
+# perl5-mt kernel runtime adapter (krt/): each backend is a self-gated
+# translation unit, so all three compile on every platform.
+krt_hdrs = krt/krt.h krt/krt_ring.h krt/krt_atomic.h krt/krt_internal.h krt/krt_wait.h krt/krt_wait_tier.h krt/krt_vec.h
+krt_objs = krt_linux$(OBJ_EXT) krt_darwin$(OBJ_EXT) krt_stubs$(OBJ_EXT)
+
+# perl5-mt core: worker interpreters, boot image, capabilities;
+# the two-tier XS dispatcher and the XS compartments;
+# the fiber context switch, one self-gated file per architecture.
+mt_hdrs = mt_err.h mt_image.h mt_cap.h mt_ctx.h mt_fiber.h mt_xs.h mt_fault.h mt_partition.h
+mt_objs = mt_worker$(OBJ_EXT) mt_freeze$(OBJ_EXT) mt_cap$(OBJ_EXT) \
+    mt_fault$(OBJ_EXT) mt_partition$(OBJ_EXT) perl_simd$(OBJ_EXT) \
+    mt_fiber$(OBJ_EXT) perlio_async$(OBJ_EXT) mt_chan$(OBJ_EXT) \
+    mt_xs_bridge$(OBJ_EXT) mt_xs_compartment$(OBJ_EXT) \
+    mt_ctx_amd64$(OBJ_EXT) mt_ctx_ppc64le$(OBJ_EXT) mt_ctx_arm64$(OBJ_EXT)
 
 miniperl_objs_nodt = $(mini_only_objs) $(common_objs) miniperlmain$(OBJ_EXT)
 perllib_objs_nodt  = $(main_only_objs) $(common_objs)
@@ -615,7 +685,7 @@ perlmain_dep = $(DTRACE_MAIN_O)
 
 miniperl_objs = $(miniperl_objs_nodt) $(DTRACE_MINI_O)
 perllib_objs  = $(perllib_objs_nodt) $(DTRACE_PERLLIB_O)
-perlmain_objs = perlmain$(OBJ_EXT) $(DTRACE_MAIN_O)
+perlmain_objs = perlmain$(OBJ_EXT) mt_partition$(OBJ_EXT) $(DTRACE_MAIN_O)
 
 miniperl_dep = $(miniperl_objs)
 perllib_dep = $(perllib_objs)
@@ -766,6 +836,117 @@ $spitshell >>$Makefile <<'!NO!SUBS!'
 
 cygwin.c: cygwin/cygwin.c
 	$(LNS) cygwin/cygwin.c
+
+krt_linux$(OBJ_EXT): krt/krt_linux.c $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) krt/krt_linux.c
+	@`$(CCCMD)` $(PLDLFLAGS) krt/krt_linux.c
+
+krt_darwin$(OBJ_EXT): krt/krt_darwin.c $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) krt/krt_darwin.c
+	@`$(CCCMD)` $(PLDLFLAGS) krt/krt_darwin.c
+
+krt_stubs$(OBJ_EXT): krt/krt_stubs.c $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) krt/krt_stubs.c
+	@`$(CCCMD)` $(PLDLFLAGS) krt/krt_stubs.c
+
+mt_worker$(OBJ_EXT): mt_worker.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_worker.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_worker.c
+
+mt_fault$(OBJ_EXT): mt_fault.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_fault.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_fault.c
+
+mt_partition$(OBJ_EXT): mt_partition.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_partition.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_partition.c
+
+mt_freeze$(OBJ_EXT): mt_freeze.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_freeze.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_freeze.c
+
+mt_cap$(OBJ_EXT): mt_cap.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_cap.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_cap.c
+
+mt_xs_bridge$(OBJ_EXT): mt_xs_bridge.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_xs_bridge.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_xs_bridge.c
+
+mt_chan$(OBJ_EXT): mt_chan.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_chan.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_chan.c
+
+perlio_async$(OBJ_EXT): perlio_async.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) perlio_async.c
+	@`$(CCCMD)` $(PLDLFLAGS) perlio_async.c
+
+mt_xs_compartment$(OBJ_EXT): mt_xs_compartment.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_xs_compartment.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_xs_compartment.c
+
+mt_ctx_amd64$(OBJ_EXT): mt_ctx_amd64.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_ctx_amd64.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_ctx_amd64.c
+
+mt_ctx_ppc64le$(OBJ_EXT): mt_ctx_ppc64le.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_ctx_ppc64le.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_ctx_ppc64le.c
+
+mt_ctx_arm64$(OBJ_EXT): mt_ctx_arm64.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_ctx_arm64.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_ctx_arm64.c
+
+mt_fiber$(OBJ_EXT): mt_fiber.c $(h) $(mt_hdrs) $(krt_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) mt_fiber.c
+	@`$(CCCMD)` $(PLDLFLAGS) mt_fiber.c
+
+# perl5-mt: the SIMD level (simd/perl_simd.c); the kernels themselves
+# are headers under simd/, listed in $(h)
+perl_simd$(OBJ_EXT): simd/perl_simd.c $(h)
+	@echo `$(CCCMD)` $(PLDLFLAGS) simd/perl_simd.c
+	@`$(CCCMD)` $(PLDLFLAGS) simd/perl_simd.c
+
+# perl5-mt native acceleration & transparent offload (accel/)
+perl_accel$(OBJ_EXT): accel/perl_accel.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/perl_accel.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/perl_accel.c
+
+accel_scalar$(OBJ_EXT): accel/accel_scalar.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_scalar.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_scalar.c
+
+accel_darwin_accelerate$(OBJ_EXT): accel/accel_darwin_accelerate.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_darwin_accelerate.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_darwin_accelerate.c
+
+accel_metal$(OBJ_EXT): accel/accel_metal.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_metal.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_metal.c
+
+accel_ane$(OBJ_EXT): accel/accel_ane.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_ane.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_ane.c
+
+accel_mesa_opencl$(OBJ_EXT): accel/accel_mesa_opencl.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_mesa_opencl.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_mesa_opencl.c
+
+accel_intel_npu$(OBJ_EXT): accel/accel_intel_npu.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_intel_npu.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_intel_npu.c
+
+accel_amd_npu$(OBJ_EXT): accel/accel_amd_npu.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_amd_npu.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_amd_npu.c
+
+accel_power_nx$(OBJ_EXT): accel/accel_power_nx.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_power_nx.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_power_nx.c
+
+accel_s390x_nnpa$(OBJ_EXT): accel/accel_s390x_nnpa.c $(accel_hdrs)
+	@echo `$(CCCMD)` $(PLDLFLAGS) accel/accel_s390x_nnpa.c
+	@`$(CCCMD)` $(PLDLFLAGS) accel/accel_s390x_nnpa.c
 
 globals$(OBJ_EXT): $(generated_headers)
 
@@ -1048,29 +1229,29 @@ $(PERL_EXE): $& $(perlmain_dep) $(LIBPERL) $(static_ext) ext.libs $(PERLEXPORT) 
 	# In AmigaOS the Perl executable needs to be linked with -ldl,
 	# but none of the other executables should be.
         amigaos) $spitshell >>$Makefile <<'!NO!SUBS!'
-	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(LLIBPERL) $(static_ext) `cat ext.libs` $(libs) -ldl
+	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(ACCEL_LINK_OBJ) $(LLIBPERL) $(static_ext) `cat ext.libs` $(libs) -ldl
 !NO!SUBS!
         ;;
         os390) $spitshell >>$Makefile <<'!NO!SUBS!'
-	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(LLIBPERL) $(static_ext) `cat ext.libs` $(libs)
+	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(ACCEL_LINK_OBJ) $(LLIBPERL) $(static_ext) `cat ext.libs` $(libs)
 !NO!SUBS!
         ;;
 
 	darwin)
 	    case "$useshrplib$osvers" in
 	    true1[5-9]*|true[2-9]*) $spitshell >>$Makefile <<'!NO!SUBS!'
-	$(SHRPENV) $(CC) -o perl $(PERL_EXE_LDFLAGS) $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
+	$(SHRPENV) $(CC) -o perl $(PERL_EXE_LDFLAGS) $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(ACCEL_LINK_OBJ) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
 !NO!SUBS!
 	       ;;
 	    *) $spitshell >>$Makefile <<'!NO!SUBS!'
-	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
+	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(ACCEL_LINK_OBJ) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
 !NO!SUBS!
 	       ;;
 	    esac
         ;;
 
         *) $spitshell >>$Makefile <<'!NO!SUBS!'
-	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
+	$(SHRPENV) $(CC) -o perl $(CLDFLAGS) $(CCDLFLAGS) $(perlmain_objs) $(ACCEL_LINK_OBJ) $(static_ext) $(LLIBPERL) `cat ext.libs` $(libs)
 !NO!SUBS!
         ;;
         esac
@@ -1368,6 +1549,7 @@ _mopup:
 	-rm -f cygwin.c libperl*.def libperl*.dll cygperl*.dll *.exe.stackdump
 	-rm -f $(PERL_EXE) $(MINIPERL_EXE) $(LIBPERL) libperl.*
 	-rm -f config.arch config.over $(DTRACE_H)
+	-rm -rf $(PGO_PROF_DIR) *.profraw *.profdata *.gcda *.gcno perf.data perf.fdata perl.order
 
 _cleaner1:
 	-cd os2; rm -f Makefile
@@ -1441,14 +1623,15 @@ _cleaner2:
 	-rmdir lib/PerlIO/via lib/PerlIO lib/Perl lib/Parse/CPAN lib/Parse
 	-rmdir lib/Params lib/Net/FTP lib/Module/Load lib/Module/CoreList
 	-rmdir lib/Module lib/Memoize lib/Math/BigRat lib/Math/BigInt
-	-rmdir lib/Math/BigFloat lib/Math lib/MIME lib/Locale/Maketext
-	-rmdir lib/Locale lib/List/Util lib/List lib/JSON/PP lib/JSON lib/IPC
-	-rmdir lib/IO/Uncompress/Adapter lib/IO/Uncompress lib/IO/Socket
-	-rmdir lib/IO/Compress/Zlib lib/IO/Compress/Zip lib/IO/Compress/Gzip
-	-rmdir lib/IO/Compress/Base lib/IO/Compress/Adapter lib/IO/Compress
-	-rmdir lib/IO lib/I18N/LangTags lib/I18N lib/Hash/Util lib/Hash
-	-rmdir lib/HTTP lib/Getopt/Long lib/Filter/Util lib/Filter
-	-rmdir lib/File/Spec lib/ExtUtils/Typemaps lib/ExtUtils/ParseXS
+	-rmdir lib/Math/BigFloat lib/Math lib/MT/XSTest lib/MT lib/MIME
+	-rmdir lib/Locale/Maketext lib/Locale lib/List/Util lib/List
+	-rmdir lib/JSON/PP lib/JSON lib/IPC lib/IO/Uncompress/Adapter
+	-rmdir lib/IO/Uncompress lib/IO/Socket lib/IO/Compress/Zlib
+	-rmdir lib/IO/Compress/Zip lib/IO/Compress/Gzip lib/IO/Compress/Base
+	-rmdir lib/IO/Compress/Adapter lib/IO/Compress lib/IO
+	-rmdir lib/I18N/LangTags lib/I18N lib/Hash/Util lib/Hash lib/HTTP
+	-rmdir lib/Getopt/Long lib/Filter/Util lib/Filter lib/File/Spec
+	-rmdir lib/ExtUtils/Typemaps lib/ExtUtils/ParseXS
 	-rmdir lib/ExtUtils/MakeMaker/version lib/ExtUtils/MakeMaker
 	-rmdir lib/ExtUtils/Liblist lib/ExtUtils/Constant lib/ExtUtils/Command
 	-rmdir lib/ExtUtils/CBuilder/Platform/Windows
@@ -1739,6 +1922,126 @@ hlist:  $(h)
 .PHONY: distcheck
 distcheck: FORCE
 	perl '-MExtUtils::Manifest=&fullcheck' -e 'fullcheck()'
+
+.PHONY: pgo pgo-gen pgo-train pgo-merge pgo-use pgo-postlink pgo-clean
+
+pgo: pgo-gen pgo-train pgo-merge pgo-use pgo-postlink
+
+pgo-clean:
+	-rm -rf $(PGO_PROF_DIR) *.profraw *.profdata *.gcda *.gcno perf.data perf.fdata perl.order
+
+pgo-gen:
+	@rm -rf $(PGO_PROF_DIR)
+	@mkdir -p $(PGO_PROF_DIR)
+	@rm -f *$(OBJ_EXT) $(LIBPERL) $(PERL_EXE) $(MINIPERL_EXE) generate_uudmap$(EXE_EXT)
+	@gen_flags="$(PGO_GEN_FLAGS)"; \
+	if test -z "$$gen_flags"; then \
+		case "$(CC)" in \
+		*clang*) gen_flags="-fprofile-instr-generate" ;; \
+		*)       gen_flags="-fprofile-generate=$(PGO_PROF_DIR)" ;; \
+		esac; \
+	fi; \
+	echo "PGO stage 1 (instrumented build): $$gen_flags"; \
+	LLVM_PROFILE_FILE="$$(pwd)/$(PGO_PROF_DIR)/build-%p-%m.profraw" \
+	PGO_STAGE=gen PGO_CFLAGS="$$gen_flags" $(MAKE) \
+		LDFLAGS="$(LDFLAGS) $$gen_flags" \
+		CLDFLAGS="$(CLDFLAGS) $$gen_flags" \
+		SHRPLDFLAGS="$(SHRPLDFLAGS) $$gen_flags" all; \
+	rc=$$?; \
+	rm -f "$(PGO_PROF_DIR)"/build-*.profraw; \
+	exit $$rc
+
+pgo-train: $(PERL_EXE)
+	@mkdir -p $(PGO_PROF_DIR)
+	@echo "PGO stage 2 (training run): tools/pgo-train.pl $(PGO_TRAIN_ARGS)"
+	@LLVM_PROFILE_FILE="$$(pwd)/$(PGO_PROF_DIR)/perl-%p-%m.profraw" \
+		$(LDLIBPTH) ./$(PERL_EXE) -Ilib tools/pgo-train.pl --perl="$$(pwd)/$(PERL_EXE)" $(PGO_TRAIN_ARGS)
+
+pgo-merge:
+	@pgo_cc="$(PGO_COMPILER)"; \
+	if test -z "$$pgo_cc"; then \
+		case "$(CC)" in \
+		*clang*) pgo_cc="clang" ;; \
+		*)       pgo_cc="gcc" ;; \
+		esac; \
+	fi; \
+	if test "$$pgo_cc" = "clang"; then \
+		profdata=""; \
+		if command -v llvm-profdata >/dev/null 2>&1; then \
+			profdata="llvm-profdata"; \
+		elif command -v xcrun >/dev/null 2>&1; then \
+			profdata="$$(xcrun --find llvm-profdata 2>/dev/null || true)"; \
+		fi; \
+		if test -z "$$profdata"; then \
+			echo "Error: llvm-profdata not found for clang PGO merge." >&2; \
+			exit 1; \
+		fi; \
+		set -- $(PGO_PROF_DIR)/*.profraw; \
+		if test ! -f "$$1"; then \
+			echo "Error: no .profraw files in $(PGO_PROF_DIR); run make pgo-train first." >&2; \
+			exit 1; \
+		fi; \
+		echo "PGO stage 3 (merge): $$profdata merge -output=$(PGO_PROF_DIR)/default.profdata"; \
+		"$$profdata" merge -output="$(PGO_PROF_DIR)/default.profdata" $(PGO_PROF_DIR)/*.profraw; \
+	else \
+		count=$$(find "$(PGO_PROF_DIR)" -name '*.gcda' 2>/dev/null | wc -l | tr -d ' '); \
+		if test "$$count" = "0"; then \
+			echo "Error: no .gcda files in $(PGO_PROF_DIR); run make pgo-train first." >&2; \
+			exit 1; \
+		fi; \
+		echo "PGO stage 3 (gcc): verified $$count .gcda profile files in $(PGO_PROF_DIR)"; \
+	fi
+
+pgo-use:
+	@rm -f *$(OBJ_EXT) $(LIBPERL) $(PERL_EXE) $(MINIPERL_EXE) generate_uudmap$(EXE_EXT)
+	@use_flags="$(PGO_USE_FLAGS)"; \
+	if test -z "$$use_flags"; then \
+		case "$(CC)" in \
+		*clang*) use_flags="-fprofile-instr-use=$(PGO_PROF_DIR)/default.profdata" ;; \
+		*)       use_flags="-fprofile-use=$(PGO_PROF_DIR) -fprofile-correction" ;; \
+		esac; \
+	fi; \
+	echo "PGO stage 4 (profile-use rebuild): $$use_flags $(PGO_LTO_FLAGS)"; \
+	PGO_STAGE=use PGO_CFLAGS="$$use_flags" $(MAKE) \
+		LDFLAGS="$(LDFLAGS) $$use_flags $(PGO_LTO_FLAGS)" \
+		CLDFLAGS="$(CLDFLAGS) $$use_flags $(PGO_LTO_FLAGS)" \
+		SHRPLDFLAGS="$(SHRPLDFLAGS) $$use_flags $(PGO_LTO_FLAGS)" all
+
+pgo-postlink: $(PERL_EXE)
+	@case "$(PGO_OSNAME)" in \
+	linux) \
+		if command -v llvm-bolt >/dev/null 2>&1 && command -v perf2bolt >/dev/null 2>&1 && command -v perf >/dev/null 2>&1; then \
+			if perf record -e cycles:u -j any,u -o "$(PGO_PROF_DIR)/perf-probe.data" -- ./$(PERL_EXE) -e 1 >/dev/null 2>&1; then \
+				rm -f "$(PGO_PROF_DIR)/perf-probe.data"; \
+				echo "PGO stage 5 (BOLT): collecting branch profile"; \
+				perf record -e cycles:u -j any,u -o "$(PGO_PROF_DIR)/perf.data" -- \
+					./$(PERL_EXE) -Ilib tools/pgo-train.pl --quick --perl="$$(pwd)/$(PERL_EXE)" >/dev/null 2>&1 && \
+				perf2bolt -p "$(PGO_PROF_DIR)/perf.data" -o "$(PGO_PROF_DIR)/perf.fdata" ./$(PERL_EXE) && \
+				llvm-bolt ./$(PERL_EXE) -o ./$(PERL_EXE).bolt -data="$(PGO_PROF_DIR)/perf.fdata" \
+					-reorder-blocks=ext-tsp -reorder-functions=hfsort -split-functions -icf=1 -use-gnu-stack && \
+				mv ./$(PERL_EXE).bolt ./$(PERL_EXE); \
+			else \
+				rm -f "$(PGO_PROF_DIR)/perf-probe.data"; \
+				echo "PGO stage 5 (BOLT): perf branch records unavailable; skipping (no-op)."; \
+			fi; \
+		else \
+			echo "PGO stage 5 (BOLT): llvm-bolt/perf2bolt/perf not installed; skipping (no-op)."; \
+		fi ;; \
+	darwin) \
+		order_file="$(PGO_ORDER_FILE)"; \
+		if test -z "$$order_file" && test -r "$(PGO_PROF_DIR)/perl.order"; then \
+			order_file="$(PGO_PROF_DIR)/perl.order"; \
+		fi; \
+		if test -n "$$order_file" && test -r "$$order_file"; then \
+			echo "PGO stage 5 (ld64 order file): relinking $(PERL_EXE) with $$order_file"; \
+			rm -f $(PERL_EXE); \
+			$(MAKE) CLDFLAGS="$(CLDFLAGS) -Wl,-order_file,$$order_file" $(PERL_EXE); \
+		else \
+			echo "PGO stage 5 (ld64 order file): no order file present; skipping (no-op)."; \
+		fi ;; \
+	*) \
+		echo "PGO stage 5 (post-link): no post-link step configured for $(PGO_OSNAME); skipping (no-op)." ;; \
+	esac
 
 .PHONY: ctags
 

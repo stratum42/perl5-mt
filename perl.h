@@ -4538,6 +4538,7 @@ typedef        struct crypt_data {     /* straight from /usr/include/crypt.h */
 #  endif
 #endif
 
+#include "mt_err.h"	/* perl5-mt: MT_* error codes */
 #include "sv.h"
 #include "regexp.h"
 #include "util.h"
@@ -4545,6 +4546,9 @@ typedef        struct crypt_data {     /* straight from /usr/include/crypt.h */
 #include "gv.h"
 #include "pad.h"
 #include "cv.h"
+#include "mt_image.h"	/* perl5-mt: the boot image */
+#include "mt_cap.h"	/* perl5-mt: capabilities */
+#include "mt_xs.h"	/* perl5-mt: the two-tier XS dispatcher */
 #include "opnames.h"
 #include "op.h"
 #include "hv.h"
@@ -5362,6 +5366,8 @@ typedef int  (*thrhook_proc_t) (pTHX);
 typedef OP* (*PPADDR_t[]) (pTHX);
 typedef bool (*destroyable_proc_t) (pTHX_ SV *sv);
 typedef void (*despatch_signals_proc_t) (pTHX);
+/* perl5-mt: the scheduler's idle hook (mt_fiber.c) */
+typedef void (*mt_sched_idle_proc_t) (pTHX);
 
 #if defined(__DYNAMIC__) && defined(PERL_DARWIN) && defined(PERL_CORE)
 #  include <crt_externs.h>	/* for the env array */
@@ -6208,11 +6214,13 @@ struct tempsym; /* defined in pp_pack.c */
 START_EXTERN_C
 #  include "intrpvar.h"
 END_EXTERN_C
-#  define PL_sv_yes   (PL_sv_immortals[0])
-#  define PL_sv_undef (PL_sv_immortals[1])
-#  define PL_sv_no    (PL_sv_immortals[2])
-#  define PL_sv_zero  (PL_sv_immortals[3])
 #endif
+
+/* perl5-mt: the immortals are process globals in every build (perlvars.h) */
+#define PL_sv_yes   (PL_sv_immortals[0])
+#define PL_sv_undef (PL_sv_immortals[1])
+#define PL_sv_no    (PL_sv_immortals[2])
+#define PL_sv_zero  (PL_sv_immortals[3])
 
 #ifdef PERL_CORE
 /* All core uses now exterminated. Ensure no zombies can return:  */
@@ -7866,6 +7874,10 @@ cannot have changed since the precalculation.
 START_EXTERN_C
 
 #  include "perlstatic.h"
+#  include "simd/perl_simd_dispatch.h"
+#  include "simd/perl_simd_bytes.h"
+#  include "simd/perl_simd_utf8.h"
+#  include "simd/perl_simd_regex.h"
 #  include "inline.h"
 #  include "sv_inline.h"
 

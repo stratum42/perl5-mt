@@ -374,22 +374,48 @@ perform the upgrade if necessary.  See C<L</svtype>>.
 #define SvFLAGS(sv)	(sv)->sv_flags
 #define SvREFCNT(sv)	(sv)->sv_refcnt
 
-#define SvREFCNT_inc(sv)		Perl_SvREFCNT_inc(MUTABLE_SV(sv))
+/* perl5-mt: an immortal SV (SVf_IMMORTAL: a process constant or a member
+ * of the sealed boot image) is shared by every worker thread and its head
+ * is read-only, so its reference count is never written.  The guard is a
+ * branch-free select: the counter to touch is either the SV's own or the
+ * per-interpreter sink PL_mt_refcnt_sink (Perl_mt_refcnt_select in
+ * sv_inline.h: a conditional move on amd64, arm64 and ppc64le, a mask
+ * elsewhere, never a conditional branch).  SvFLAGS shares the SV head
+ * cache line with SvREFCNT, so the flag load is free.  Because of the
+ * select every inc needs the interpreter context, exactly like
+ * SvREFCNT_dec always did. */
+#ifdef PERL_MT_DEBUG_IMMORTAL
+#  define MT_REFCNT_TARGET(sv)                                          \
+    (Perl_mt_check_immortal((const SV *)(sv))                            \
+        ? &PL_mt_refcnt_sink : &SvREFCNT(sv))
+#else
+#  define MT_REFCNT_TARGET(sv)                                          \
+    Perl_mt_refcnt_select(&SvREFCNT(sv), &PL_mt_refcnt_sink,            \
+                          SvFLAGS(sv) & SVf_IMMORTAL)
+#endif
+
+#define SvREFCNT_inc(sv)		Perl_SvREFCNT_inc(aTHX_ MUTABLE_SV(sv))
 #define SvREFCNT_inc_simple(sv)		SvREFCNT_inc(sv)
-#define SvREFCNT_inc_NN(sv)		Perl_SvREFCNT_inc_NN(MUTABLE_SV(sv))
-#define SvREFCNT_inc_void(sv)		Perl_SvREFCNT_inc_void(MUTABLE_SV(sv))
+#define SvREFCNT_inc_NN(sv)		Perl_SvREFCNT_inc_NN(aTHX_ MUTABLE_SV(sv))
+#define SvREFCNT_inc_void(sv)		Perl_SvREFCNT_inc_void(aTHX_ MUTABLE_SV(sv))
 
 /* These guys don't need the curly blocks */
 #define SvREFCNT_inc_simple_void(sv)	                                \
         STMT_START {                                                    \
             SV * sv_ = MUTABLE_SV(sv);                                  \
             if (sv_)                                                    \
-                SvREFCNT(sv_)++;                                        \
+                ++*MT_REFCNT_TARGET(sv_);                               \
         } STMT_END
 
-#define SvREFCNT_inc_simple_NN(sv)	(++(SvREFCNT(sv)),MUTABLE_SV(sv))
-#define SvREFCNT_inc_void_NN(sv)	(void)(++SvREFCNT(MUTABLE_SV(sv)))
-#define SvREFCNT_inc_simple_void_NN(sv)	(void)(++SvREFCNT(MUTABLE_SV(sv)))
+/* perl5-mt: these were single-evaluation macros upstream and the core
+ * relies on that (SvREFCNT_inc_simple_void_NN(sv_2mortal(sv)) is common
+ * despite the 'simple' name), so with the immortal select added they
+ * become calls to the static inline functions in sv_inline.h, which the
+ * compiler expands to the same code. */
+#define SvREFCNT_inc_simple_void_NN(sv)	\
+    Perl_SvREFCNT_inc_void_NN(aTHX_ MUTABLE_SV(sv))
+#define SvREFCNT_inc_simple_NN(sv)	Perl_SvREFCNT_inc_NN(aTHX_ MUTABLE_SV(sv))
+#define SvREFCNT_inc_void_NN(sv)	Perl_SvREFCNT_inc_void_NN(aTHX_ MUTABLE_SV(sv))
 
 #define SvREFCNT_dec(sv)	Perl_SvREFCNT_dec(aTHX_ MUTABLE_SV(sv))
 #define SvREFCNT_dec_set_NULL(sv)                               \
@@ -398,8 +424,33 @@ perform the upgrade if necessary.  See C<L</svtype>>.
     } STMT_END
 #define SvREFCNT_dec_NN(sv)	Perl_SvREFCNT_dec_NN(aTHX_ MUTABLE_SV(sv))
 
-#define SVTYPEMASK	0xff
+/* perl5-mt: the type field is 5 bits wide (SVt_LAST is 16, the freed
+ * marker is SVTYPEMASK itself), which frees 0x20 for SVf_IMMORTAL. */
+#define SVTYPEMASK	0x1f
 #define SvTYPE(sv)	((svtype)((sv)->sv_flags & SVTYPEMASK))
+STATIC_ASSERT_DECL(SVt_LAST < SVTYPEMASK);
+
+/* perl5-mt: the SV is immortal for the life of the process: either one of
+ * the process-global immortals (PL_sv_immortals[], PL_sv_placeholder) or a
+ * member of the sealed boot image shared by every worker interpreter.  Its
+ * reference count is never touched, it is never freed, and attempts to
+ * mutate it (SvREADONLY_off, sv_upgrade, SvSHARE) croak with
+ * MT_IMMORTAL_MUTATION. */
+#define SVf_IMMORTAL	0x00000020
+#define SVf_IMMORTAL_SHIFT 5
+STATIC_ASSERT_DECL((1U << SVf_IMMORTAL_SHIFT) == SVf_IMMORTAL);
+#define SvIMMORTAL_MT(sv)	(SvFLAGS(sv) & SVf_IMMORTAL)
+
+/* The test used by the slow-path reference-count guards (sv_free2 and
+ * friends; the inline fast paths use the MT_REFCNT_TARGET select below).
+ * With PERL_MT_DEBUG_IMMORTAL every SV that claims to be immortal is
+ * verified (util.c) and the process aborts with a dump of the SV when it
+ * is not a genuine immortal. */
+#ifdef PERL_MT_DEBUG_IMMORTAL
+#  define SvIMMORTAL_MT_RC(sv)	(Perl_mt_check_immortal((const SV *)(sv)))
+#else
+#  define SvIMMORTAL_MT_RC(sv)	(UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL))
+#endif
 
 /* Sadly there are some parts of the core that have pointers to already-freed
    SV heads, and rely on being able to tell that they are now free. So mark
@@ -496,6 +547,9 @@ perform the upgrade if necessary.  See C<L</svtype>>.
                                        only happen as a side effect of SvPV() */
 /* PVHV */
 #define SVphv_SHAREKEYS 0x20000000  /* PVHV keys live on shared string table */
+/* PVAV */
+#define SVf_PACKED_AV   0x20000000  /* PVAV uses packed typed storage */
+#define SvPACKED_AV(sv) (SvTYPE(sv) == SVt_PVAV && (SvFLAGS(sv) & SVf_PACKED_AV))
 
 /* PVAV could probably use 0x2000000 without conflict. I assume that PVFM can
    be UTF-8 encoded, and PVCVs could well have UTF-8 prototypes. PVIOs haven't
@@ -648,6 +702,9 @@ typedef U32 cv_flags_t;
                                   * compilation) in the lexically enclosing	\
                                   * sub */					\
     cv_flags_t	xcv_flags;						\
+    U32		xcv_mt_id;	/* perl5-mt: index of this CV in the boot	\
+                                 * image; keys the per-worker depth and	\
+                                 * padlist tables (assigned at freeze) */	\
     I32	xcv_depth	/* >= 2 indicates recursive call */
 
 /* This structure must match XPVCV in cv.h */
@@ -1111,8 +1168,8 @@ Remove any string offset.
 #define SvOOK_off(sv)		((void)(SvOOK(sv) && (sv_backoff(sv),0)))
 
 #define SvFAKE(sv)		(SvFLAGS(sv) & SVf_FAKE)
-#define SvFAKE_on(sv)		(SvFLAGS(sv) |= SVf_FAKE)
-#define SvFAKE_off(sv)		(SvFLAGS(sv) &= ~SVf_FAKE)
+#define SvFAKE_on(sv)		Perl_SvFAKE_on(MUTABLE_SV(sv))
+#define SvFAKE_off(sv)		Perl_SvFAKE_off(MUTABLE_SV(sv))
 
 #define SvROK(sv)		(SvFLAGS(sv) & SVf_ROK)
 #define SvROK_on(sv)		(SvFLAGS(sv) |= SVf_ROK)
@@ -1147,9 +1204,19 @@ not.
                                  HvAMAGIC(SvSTASH(SvRV(sv))))
 
 /* To be used on the stashes themselves: */
-#define HvAMAGIC(hv)		(SvFLAGS(hv) & SVf_AMAGIC)
-#define HvAMAGIC_on(hv)		(SvFLAGS(hv) |= SVf_AMAGIC)
-#define HvAMAGIC_off(hv)	(SvFLAGS(hv) &=~ SVf_AMAGIC)
+/* perl5-mt: the head of a frozen stash is never written; a worker that
+ * defines or removes overloads on an image class keeps the flag in its
+ * own table (PL_mt_hv_amagic, mt_worker.c), consulted here for immortal
+ * stashes and falling back to the image's flag */
+#define HvAMAGIC(hv)      (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)               \
+                           ? Perl_mt_hv_amagic_nocontext((const HV *)(hv))   \
+                           : cBOOL(SvFLAGS(hv) & SVf_AMAGIC))
+#define HvAMAGIC_on(hv)   (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)               \
+                           ? Perl_mt_hv_amagic_set_nocontext((HV *)(hv), 1)   \
+                           : (void)(SvFLAGS(hv) |= SVf_AMAGIC))
+#define HvAMAGIC_off(hv)  (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)               \
+                           ? Perl_mt_hv_amagic_set_nocontext((HV *)(hv), 2)   \
+                           : (void)(SvFLAGS(hv) &= ~SVf_AMAGIC))
 
 
 /* "nog" means "doesn't have get magic" */
@@ -1255,14 +1322,26 @@ C<sv_force_normal> does nothing.
 #define SvPADTMP(sv)		(SvFLAGS(sv) & (SVs_PADTMP))
 #define SvPADSTALE(sv)		(SvFLAGS(sv) & (SVs_PADSTALE))
 
-#define SvPADTMP_on(sv)		(SvFLAGS(sv) |= SVs_PADTMP)
-#define SvPADTMP_off(sv)	(SvFLAGS(sv) &= ~SVs_PADTMP)
+#define SvPADTMP_on(sv)		Perl_SvPADTMP_on(MUTABLE_SV(sv))
+#define SvPADTMP_off(sv)	Perl_SvPADTMP_off(MUTABLE_SV(sv))
 #define SvPADSTALE_on(sv)	Perl_SvPADSTALE_on(MUTABLE_SV(sv))
 #define SvPADSTALE_off(sv)	Perl_SvPADSTALE_off(MUTABLE_SV(sv))
 
 #define SvTEMP(sv)		(SvFLAGS(sv) & SVs_TEMP)
-#define SvTEMP_on(sv)		(SvFLAGS(sv) |= SVs_TEMP)
-#define SvTEMP_off(sv)		(SvFLAGS(sv) &= ~SVs_TEMP)
+/* perl5-mt: these bookkeeping flags are never written on an immortal (a
+ * member of the sealed boot image used as a mortal, a pad entry or a glob
+ * alias): the write is skipped, the semantics do not need it.  They are
+ * inline functions (sv_inline.h) so that the argument is evaluated once. */
+#define SvTEMP_on(sv)		Perl_SvTEMP_on(MUTABLE_SV(sv))
+#define SvTEMP_off(sv)		Perl_SvTEMP_off(MUTABLE_SV(sv))
+/* the definitions are in sv_inline.h; headers between here and there use
+ * the macros inside inline functions */
+PERL_STATIC_INLINE void Perl_SvTEMP_on(SV *sv);
+PERL_STATIC_INLINE void Perl_SvTEMP_off(SV *sv);
+PERL_STATIC_INLINE void Perl_SvFAKE_on(SV *sv);
+PERL_STATIC_INLINE void Perl_SvFAKE_off(SV *sv);
+PERL_STATIC_INLINE void Perl_SvPADTMP_on(SV *sv);
+PERL_STATIC_INLINE void Perl_SvPADTMP_off(SV *sv);
 
 #define SvOBJECT(sv)		(SvFLAGS(sv) & SVs_OBJECT)
 #define SvOBJECT_on(sv)		(SvFLAGS(sv) |= SVs_OBJECT)
@@ -1285,12 +1364,22 @@ object type. Exposed to perl code via Internals::SvREADONLY().
 */
 
 #define SvREADONLY(sv)		(SvFLAGS(sv) & (SVf_READONLY|SVf_PROTECT))
+
+/* perl5-mt: immortal SVs may never be made writable or shared; the guard
+ * croaks with MT_IMMORTAL_MUTATION.  It uses the nocontext croak so that
+ * it works in XS code compiled without an interpreter context. */
+#define MT_IMMORTAL_GUARD(sv)                                           \
+    (SvIMMORTAL_MT_RC(sv)                                               \
+        ? Perl_croak_mt_nocontext(MT_IMMORTAL_MUTATION) : (void)0)
+
 #ifdef PERL_CORE
 # define SvREADONLY_on(sv)	(SvFLAGS(sv) |= (SVf_READONLY|SVf_PROTECT))
-# define SvREADONLY_off(sv)	(SvFLAGS(sv) &=~(SVf_READONLY|SVf_PROTECT))
+# define SvREADONLY_off(sv)	\
+    (MT_IMMORTAL_GUARD(sv), SvFLAGS(sv) &=~(SVf_READONLY|SVf_PROTECT))
 #else
 # define SvREADONLY_on(sv)	(SvFLAGS(sv) |= SVf_READONLY)
-# define SvREADONLY_off(sv)	(SvFLAGS(sv) &= ~SVf_READONLY)
+# define SvREADONLY_off(sv)	\
+    (MT_IMMORTAL_GUARD(sv), SvFLAGS(sv) &= ~SVf_READONLY)
 #endif
 
 #define SvSCREAM(sv) ((SvFLAGS(sv) & (SVp_SCREAM|SVp_POK)) == (SVp_SCREAM|SVp_POK))
@@ -2351,7 +2440,7 @@ that already have a PV buffer allocated, but no SvTHINKFIRST.
 
 #define SvPVCLEAR(sv) sv_setpv_bufsize(sv,0,0)
 #define SvPVCLEAR_FRESH(sv) sv_setpv_freshbuf(sv)
-#define SvSHARE(sv) PL_sharehook(aTHX_ sv)
+#define SvSHARE(sv) (MT_IMMORTAL_GUARD(sv), PL_sharehook(aTHX_ sv))
 #define SvLOCK(sv) PL_lockhook(aTHX_ sv)
 #define SvUNLOCK(sv) PL_unlockhook(aTHX_ sv)
 #define SvDESTROYABLE(sv) PL_destroyhook(aTHX_ sv)
@@ -2408,10 +2497,14 @@ that already have a PV buffer allocated, but no SvTHINKFIRST.
 /* Does this immortal have a true value? Currently only PL_sv_yes does. */
 #define SvIMMORTAL_TRUE(sv)   ((sv) == &PL_sv_yes)
 
-/* the SvREADONLY() test is to quickly reject most SVs */
+/* the SvREADONLY() test is to quickly reject most SVs.  perl5-mt: every
+ * immortal, including the members of the sealed boot image, carries
+ * SVf_IMMORTAL; the address tests remain for SVs seen before
+ * init_constants() has run. */
 #define SvIMMORTAL(sv) \
-                (  SvREADONLY(sv) \
-                && (SvIMMORTAL_INTERP(sv) || (sv) == &PL_sv_placeholder))
+                (  (SvFLAGS(sv) & SVf_IMMORTAL) \
+                || (  SvREADONLY(sv) \
+                   && (SvIMMORTAL_INTERP(sv) || (sv) == &PL_sv_placeholder)))
 
 #ifdef DEBUGGING
    /* exercise the immortal resurrection code in sv_free2() */
@@ -2513,6 +2606,12 @@ Returns a boolean as to whether or not C<sv> is a GV with a pointer to a GP
 #define CLONEf_KEEP_PTR_TABLE 2
 #define CLONEf_CLONE_HOST 4
 #define CLONEf_JOIN_IN 8
+#define CLONEf_MT_WORKER 16	/* perl5-mt: copying from the boot image into
+                                 * a worker: shareable immortals (CVs, GVs,
+                                 * stashes, regexps) are returned as they
+                                 * are, everything else is copied */
+#define CLONEf_MT_COPY_RE 32	/* perl5-mt: ... but copy regexps too (used
+                                 * by PM_GETRE to materialise one) */
 
 struct clone_params {
   AV* stashes;

@@ -1374,10 +1374,8 @@ ithread_join(...)
             clone_params.flags = CLONEf_JOIN_IN;
             PL_ptr_table = ptr_table_new();
             S_ithread_set(aTHX_ thread);
-            /* Ensure 'meaningful' addresses retain their meaning */
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_undef, &PL_sv_undef);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_no, &PL_sv_no);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_yes, &PL_sv_yes);
+            /* perl5-mt: the immortals are process globals; sv_dup() returns
+             * them unchanged, so no 'meaningful address' remapping is needed */
             params = (AV *)sv_dup((SV*)params_copy, &clone_params);
             S_ithread_set(aTHX_ current_thread);
             SvREFCNT_dec(clone_params.stashes);
@@ -1393,13 +1391,8 @@ ithread_join(...)
             clone_params->flags |= CLONEf_JOIN_IN;
             PL_ptr_table = ptr_table_new();
             S_ithread_set(aTHX_ thread);
-            /* Ensure 'meaningful' addresses retain their meaning */
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_undef, &PL_sv_undef);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_no, &PL_sv_no);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_yes, &PL_sv_yes);
-#  ifdef PL_sv_zero
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_zero, &PL_sv_zero);
-#  endif
+            /* perl5-mt: the immortals are process globals; sv_dup() returns
+             * them unchanged, so no 'meaningful address' remapping is needed */
             params = (AV *)sv_dup((SV*)params_copy, clone_params);
             S_ithread_set(aTHX_ current_thread);
             Perl_clone_params_del(clone_params);
@@ -1805,10 +1798,8 @@ ithread_error(...)
             PL_ptr_table = ptr_table_new();
             current_thread = S_ithread_get(aTHX);
             S_ithread_set(aTHX_ thread);
-            /* Ensure 'meaningful' addresses retain their meaning */
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_undef, &PL_sv_undef);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_no, &PL_sv_no);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_yes, &PL_sv_yes);
+            /* perl5-mt: the immortals are process globals; sv_dup() returns
+             * them unchanged, so no 'meaningful address' remapping is needed */
             err = sv_dup(thread->err, &clone_params);
             S_ithread_set(aTHX_ current_thread);
             SvREFCNT_dec(clone_params.stashes);
@@ -1828,13 +1819,8 @@ ithread_error(...)
             PL_ptr_table = ptr_table_new();
             current_thread = S_ithread_get(aTHX);
             S_ithread_set(aTHX_ thread);
-            /* Ensure 'meaningful' addresses retain their meaning */
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_undef, &PL_sv_undef);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_no, &PL_sv_no);
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_yes, &PL_sv_yes);
-#  ifdef PL_sv_zero
-            ptr_table_store(PL_ptr_table, &other_perl->Isv_zero, &PL_sv_zero);
-#  endif
+            /* perl5-mt: the immortals are process globals; sv_dup() returns
+             * them unchanged, so no 'meaningful address' remapping is needed */
             err = sv_dup(thread->err, clone_params);
             S_ithread_set(aTHX_ current_thread);
             Perl_clone_params_del(clone_params);

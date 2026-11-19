@@ -713,6 +713,8 @@ EXTRACORE_SRC	= $(EXTRACORE_SRC) ..\malloc.c
 !ENDIF
 
 EXTRACORE_SRC	= $(EXTRACORE_SRC) ..\perlio.c
+# perl5-mt: the SIMD level
+EXTRACORE_SRC	= $(EXTRACORE_SRC) ..\simd\perl_simd.c
 
 WIN32_SRC	=		\
 		.\win32.c	\
@@ -1238,6 +1240,7 @@ distclean: realclean
 	-if exist $(LIBDIR)\Memoize rmdir /s /q $(LIBDIR)\Memoize
 	-if exist $(LIBDIR)\MIME rmdir /s /q $(LIBDIR)\MIME
 	-if exist $(LIBDIR)\Module rmdir /s /q $(LIBDIR)\Module
+	-if exist $(LIBDIR)\MT rmdir /s /q $(LIBDIR)\MT
 	-if exist $(LIBDIR)\Net\FTP rmdir /s /q $(LIBDIR)\Net\FTP
 	-if exist $(LIBDIR)\Params rmdir /s /q $(LIBDIR)\Params
 	-if exist $(LIBDIR)\Parse rmdir /s /q $(LIBDIR)\Parse

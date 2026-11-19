@@ -36,6 +36,7 @@
 #include "perl.h"
 #include "regcomp.h"
 #include "feature.h"
+#include "core-math/mt_nan.h"
 
 /* Hot code. */
 
@@ -196,7 +197,9 @@ Perl_rpp_free_2_(pTHX_ SV *const sv1,  SV *const sv2,
     PERL_ARGS_ASSERT_RPP_FREE_2_;
 
 #ifdef PERL_RC_STACK
-    if (rc1 > 1)
+    if (SvFLAGS(sv1) & SVf_IMMORTAL)   /* perl5-mt: never counted */
+        NOOP;
+    else if (rc1 > 1)
         SvREFCNT(sv1) = rc1 - 1;
     else {
         /* temporarily reclaim sv2 on stack in case we die while freeing sv1 */
@@ -205,7 +208,9 @@ Perl_rpp_free_2_(pTHX_ SV *const sv1,  SV *const sv2,
         Perl_sv_free2(aTHX_ sv1, rc1);
         PL_stack_sp--;
     }
-    if (rc2 > 1)
+    if (SvFLAGS(sv2) & SVf_IMMORTAL)
+        NOOP;
+    else if (rc2 > 1)
         SvREFCNT(sv2) = rc2 - 1;
     else
         Perl_sv_free2(aTHX_ sv2, rc2);
@@ -240,11 +245,24 @@ PP(pp_nextstate)
 
 PP(pp_gvsv)
 {
-    assert(SvTYPE(cGVOP_gv) == SVt_PVGV);
-    rpp_xpush_1(
-            UNLIKELY(PL_op->op_private & OPpLVAL_INTRO)
-                ? save_scalar(cGVOP_gv)
-                : GvSVn(cGVOP_gv));
+    GV * const gv = cGVOP_gv;
+    assert(SvTYPE(gv) == SVt_PVGV);
+    if (UNLIKELY(PL_op->op_private & OPpLVAL_INTRO)) {
+        rpp_xpush_1(save_scalar(gv));
+    }
+    else if (PL_mt_gp_table && (SvFLAGS(gv) & SVf_IMMORTAL)) {
+        /* inline worker GP lookup avoids Perl_mt_gvgp() call
+         * once the worker's GP slot is materialized. */
+        GP * const raw = GvGP_raw(gv);
+        GP * const wgp = raw ? PL_mt_gp_table[raw->gp_mt_id] : NULL;
+        if (LIKELY(wgp && wgp->gp_sv))
+            rpp_xpush_1(wgp->gp_sv);
+        else
+            rpp_xpush_1(GvSVn(gv));
+    }
+    else {
+        rpp_xpush_1(GvSVn(gv));
+    }
     return NORMAL;
 }
 
@@ -1693,6 +1711,111 @@ PP(pp_eq)
     return NORMAL;
 }
 
+/* fused compare-and-branch superinstructions.
+ * Each replaces (cmp -> cond_expr) without pushing/popping boolSV or
+ * dispatching pp_cond_expr.  On overloaded operands, rpp_try_AMAGIC_2
+ * leaves the overloaded result on the stack and returns NORMAL (cond_expr). */
+
+#define MT_DEFINE_NCMP_COND(name, amg, op, ncmp_expr)                   \
+OP *                                                                    \
+Perl_pp_##name##_cond(pTHX)                                             \
+{                                                                       \
+    OP * const cond_op = PL_op->op_next;                                \
+    SV *right, *left;                                                   \
+    U32 flags_and, flags_or;                                            \
+    bool ok;                                                            \
+    if (rpp_try_AMAGIC_2(amg, AMGf_numeric))                            \
+        return NORMAL;                                                  \
+    right = PL_stack_sp[0];                                             \
+    left  = PL_stack_sp[-1];                                            \
+    flags_and = SvFLAGS(left) & SvFLAGS(right);                         \
+    flags_or  = SvFLAGS(left) | SvFLAGS(right);                         \
+    if ((flags_and & SVf_IOK) && ((flags_or & SVf_IVisUV) == 0))        \
+        ok = (SvIVX(left) op SvIVX(right));                             \
+    else if (flags_and & SVf_NOK)                                       \
+        ok = (SvNVX(left) op SvNVX(right));                             \
+    else {                                                              \
+        const I8 cmp = do_ncmp(left, right);                            \
+        ok = (ncmp_expr);                                               \
+    }                                                                   \
+    rpp_popfree_2_NN();                                                 \
+    PERL_ASYNC_CHECK();                                                 \
+    return ok ? cLOGOPx(cond_op)->op_other : cond_op->op_next;          \
+}
+
+MT_DEFINE_NCMP_COND(eq, eq_amg, ==, cmp == 0)
+MT_DEFINE_NCMP_COND(ne, ne_amg, !=, cmp != 0)
+MT_DEFINE_NCMP_COND(lt, lt_amg, <,  cmp == -1)
+MT_DEFINE_NCMP_COND(gt, gt_amg, >,  cmp == 1)
+MT_DEFINE_NCMP_COND(le, le_amg, <=, cmp == -1 || cmp == 0)
+MT_DEFINE_NCMP_COND(ge, ge_amg, >=, cmp == 1  || cmp == 0)
+#undef MT_DEFINE_NCMP_COND
+
+OP *
+Perl_pp_defined_cond(pTHX)
+{
+    OP * const cond_op = PL_op->op_next;
+    SV * const sv = *PL_stack_sp;
+    bool ok = FALSE;
+
+    if (LIKELY(sv && SvANY(sv))) {
+        if (UNLIKELY(SvTYPE(sv) == SVt_PVCV)) {
+            if (CvROOT(sv) || CvXSUB(sv))
+                ok = TRUE;
+        }
+        else {
+            SvGETMAGIC(sv);
+            if (SvOK(sv))
+                ok = TRUE;
+        }
+    }
+    rpp_popfree_1();
+    PERL_ASYNC_CHECK();
+    return ok ? cLOGOPx(cond_op)->op_other : cond_op->op_next;
+}
+
+/* fused shift + padsv_store (my $x = shift @a; my $self = shift;)
+ * Native RC-stack aware, skipping the pp_shift stack push and pp_padsv_store
+ * dispatch. */
+OP *
+Perl_pp_shift_padsv_store(pTHX)
+{
+    OP * const shift_op = PL_op;
+    OP * const store_op = shift_op->op_next;
+    const bool is_special = cBOOL(shift_op->op_flags & OPf_SPECIAL);
+    AV * const av = is_special
+        ? MUTABLE_AV(GvAVn(PL_defgv))
+        : MUTABLE_AV(*PL_stack_sp);
+    SV * const val = av_shift(av);
+    SV ** const padentry = &PAD_SVl(store_op->op_targ);
+    SV * const targ = *padentry;
+
+    assert(val);
+    if (AvREAL(av))
+        (void)sv_2mortal(val);
+
+    if ((store_op->op_private & (OPpLVAL_INTRO|OPpPAD_STATE)) == OPpLVAL_INTRO)
+        save_clearsv(padentry);
+
+    assert(TAINTING_get || !TAINT_get);
+    if (UNLIKELY(TAINT_get) && !SvTAINTED(val))
+        TAINT_NOT;
+
+    if (UNLIKELY(SvTEMP(targ)) && !SvSMAGICAL(targ) && SvREFCNT(targ) == 1
+        && (!isGV_with_GP(targ) || SvFAKE(targ)) && ckWARN(WARN_MISC))
+        Perl_warner(aTHX_ packWARN(WARN_MISC),
+                    "Useless assignment to a temporary");
+
+    SvSetMagicSV(targ, val);
+
+    if (is_special)
+        rpp_xpush_1(targ);
+    else
+        rpp_replace_1_1_NN(targ);
+
+    return store_op->op_next;
+}
+
 
 /* also used for: pp_i_preinc() */
 
@@ -1857,7 +1980,7 @@ PP(pp_add)
                 /* nothing was lost by converting to IVs */
                 goto do_iv;
             }
-            TARGn(nl + nr, 0); /* args not GMG, so can't be tainted */
+            TARGn(mt_canon_nv(nl + nr), 0); /* args not GMG, so can't be tainted */
             goto ret;
         }
     }
@@ -2019,10 +2142,10 @@ PP(pp_add)
         NV value = SvNV_nomg(svr);
         if (!useleft) {
             /* left operand is undef, treat as zero. + 0.0 is identity. */
-            TARGn(value, 1);
+            TARGn(mt_canon_nv(value), 1);
         }
         else {
-            TARGn(value + SvNV_nomg(svl), 1);
+            TARGn(mt_canon_nv(value + SvNV_nomg(svl)), 1);
         }
     }
 
@@ -3837,7 +3960,9 @@ PP(pp_match)
 #ifdef USE_ITHREADS
         SvREADONLY_on(PL_regex_pad[dynpm->op_pmoffset]);
 #else
-        dynpm->op_pmflags |= PMf_USED;
+        /* perl5-mt: a ?pat? in the sealed boot image cannot record its use */
+        if (!(dynpm->op_slabbed && OpSLAB(dynpm)->opslab_readonly))
+            dynpm->op_pmflags |= PMf_USED;
 #endif
 
     if (rxtainted)
@@ -4341,6 +4466,62 @@ Perl_do_readline(pTHX)
 }
 
 
+/* O(1) overlay-validated inline cache lookup for constant-key
+ * reads from immortal frozen hashes when the worker's shadow is empty. */
+PERL_STATIC_INLINE U32
+S_mt_ic_hash_ptr(const void *p)
+{
+    uintptr_t v = (uintptr_t)p;
+    v ^= v >> 17;
+    v *= (uintptr_t)0xbf58476d1ce4e5b9ULL;
+    v ^= v >> 31;
+    return (U32)v;
+}
+
+STATIC SV *
+S_mt_helem_ic_lookup(pTHX_ HV *hv, SV *keysv)
+{
+    const struct perl_mt_image * const img = PL_mt_image;
+    const U32 hid = HvMT_ID(HvAUX_raw(hv));
+    U32 hash;
+    STRLEN klen;
+    const char *kpv;
+    bool kutf8;
+    U32 slot, mask;
+
+    if (!img || !img->helem_ic || !PL_mt_hv_shadow)
+        return NULL;
+    if (UNLIKELY(PL_mt_hv_shadow[hid] != NULL))
+        return NULL;
+    if (!SvPOKp(keysv) || SvGMAGICAL(keysv))
+        return NULL;
+
+    kpv = SvPVX_const(keysv);
+    klen = SvCUR(keysv);
+    kutf8 = cBOOL(SvUTF8(keysv));
+    if (SvIsCOW_shared_hash(keysv))
+        hash = SvSHARED_HASH(keysv);
+    else {
+        hash = 0;
+        PERL_HASH(hash, kpv, klen);
+    }
+
+    mask = img->helem_ic_mask;
+    slot = (S_mt_ic_hash_ptr(hv) ^ hash) & mask;
+    while (img->helem_ic[slot].hv) {
+        const struct perl_mt_helem_ic * const e = &img->helem_ic[slot];
+        if (e->hv == hv && e->key_hash == hash) {
+            HEK * const hek = e->hek;
+            if ((STRLEN)HEK_LEN(hek) == klen
+                && cBOOL(HEK_UTF8(hek)) == kutf8
+                && memEQ(HEK_KEY(hek), kpv, klen))
+                return e->val;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
 PP(pp_helem)
 {
     HE* he;
@@ -4357,6 +4538,19 @@ PP(pp_helem)
     if (SvTYPE(hv) != SVt_PVHV) {
         retsv = &PL_sv_undef;
         goto ret;
+    }
+
+    /* overlay-validated inline cache for rvalue reads on frozen
+     * immortal hashes when the worker has not shadowed this hash. */
+    if (LIKELY(!lval && !localizing && !SvRMAGICAL(hv))
+        && UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)
+        && PL_mt_hv_shadow && HvHasAUX(hv))
+    {
+        SV * const cached = S_mt_helem_ic_lookup(aTHX_ hv, keysv);
+        if (cached) {
+            retsv = cached;
+            goto ret;
+        }
     }
 
     if (localizing) {
@@ -6128,6 +6322,17 @@ PP(pp_leavesub)
 
     if (gimme == G_VOID)
         rpp_popfree_to_NN(oldsp);
+    else if (gimme == G_SCALAR
+             && PL_stack_sp == oldsp + 1
+             && PL_tmps_ix == PL_tmps_floor
+             && (*PL_stack_sp)
+             && (SvFLAGS(*PL_stack_sp) & SVf_IMMORTAL)
+             && !(SvFLAGS(*PL_stack_sp) & (SVs_PADTMP|SVs_TEMP|SVs_GMG|SVs_SMG|SVs_RMG)))
+    {
+        /* fast scalar return for a single immortal/constant value
+         * with no temporaries to flush. */
+        TAINT_NOT;
+    }
     else
         leave_adjust_stacks(oldsp, oldsp, gimme, 0);
 
@@ -6174,16 +6379,317 @@ Perl_clear_defarray(pTHX_ AV* av, bool abandon)
 }
 
 
+/* O(1) lookup in the freeze-time call-site specialisation table. */
+PERL_STATIC_INLINE const struct perl_mt_site_ic *
+S_mt_site_ic_lookup(const struct perl_mt_image *img, const OP *op)
+{
+    U32 mask, slot;
+    if (!img || !img->site_ic || !img->specialize_enabled)
+        return NULL;
+    mask = img->site_ic_mask;
+    slot = S_mt_ic_hash_ptr(op) & mask;
+    while (img->site_ic[slot].op) {
+        if (img->site_ic[slot].op == op)
+            return &img->site_ic[slot];
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+/* shared sub/XSUB invocation core used by both pp_entersub()
+ * and the fused Perl_pp_method_named_entersub() superinstruction.
+ * Caller has already resolved cv (and popped any CV/GV SV from stack). */
+STATIC OP *
+S_entersub_cv(pTHX_ CV *cv, I32 old_savestack_ix)
+{
+    PERL_CONTEXT *cx;
+
+    assert(cv);
+
+    /* unrolled "CvCLONE(cv) && ! CvCLONED(cv)" */
+    if (UNLIKELY((CvFLAGS(cv) & (CVf_CLONE|CVf_CLONED)) == CVf_CLONE))
+        DIE(aTHX_ "Closure prototype called");
+
+    if (UNLIKELY((PL_op->op_private & OPpENTERSUB_DB) && GvCV(PL_DBsub)
+            && !CvNODEBUG(cv)))
+    {
+        SV *sv = MUTABLE_SV(cv);
+        Perl_get_db_sub(aTHX_ &sv, cv);
+        if (CvISXSUB(cv))
+            PL_curcopdb = PL_curcop;
+        if (CvLVALUE(cv)) {
+            cv = GvCV(gv_fetchpvs("DB::lsub", GV_ADDMULTI, SVt_PVCV));
+            if (!cv) cv = GvCV(PL_DBsub);
+        } else {
+            cv = GvCV(PL_DBsub);
+        }
+
+        if (!cv || (!CvXSUB(cv) && !CvSTART(cv)))
+            DIE(aTHX_ "No DB::sub routine defined");
+    }
+
+    if (!(CvISXSUB(cv))) {
+        /* This path taken at least 75% of the time */
+        dMARK;
+        PADLIST *padlist;
+        I32 depth;
+        bool hasargs;
+        U8 gimme;
+        SSize_t items = PL_stack_sp - MARK;
+
+        /* keep PADTMP args alive throughout the call */
+        if (items > 0) {
+            SV **svp = MARK;
+            while (svp < PL_stack_sp) {
+                SV *sv = *++svp;
+                if (!sv)
+                    continue;
+                if (SvPADTMP(sv)) {
+#ifdef PERL_RC_STACK
+                    /* stack owns the copy directly; avoid
+                     * mortalisation churn on PL_tmps_stack. */
+                    SV *newsv = newSVsv(sv);
+                    *svp = newsv;
+                    SvREFCNT_dec_NN(sv);
+                    sv = newsv;
+#else
+                    SV *newsv = sv_mortalcopy(sv);
+                    *svp = newsv;
+                    sv = newsv;
+#endif
+                }
+                SvTEMP_off(sv);
+            }
+        }
+
+        gimme = GIMME_V;
+        cx = cx_pushblock(CXt_SUB, gimme, MARK, old_savestack_ix);
+        hasargs = cBOOL(PL_op->op_flags & OPf_STACKED);
+        cx_pushsub(cx, cv, PL_op->op_next, hasargs);
+
+        padlist = CvPADLIST(cv);
+        MT_PAD_ACQUIRE(cx, cv, padlist, depth);
+        PAD_SET_CUR_NOSAVE(padlist, depth);
+        if (LIKELY(hasargs)) {
+            AV *const av = MUTABLE_AV(PAD_SVl(0));
+            AV **defavp;
+
+            defavp = &GvAV(PL_defgv);
+            cx->blk_sub.savearray = *defavp;
+            *defavp = MUTABLE_AV(SvREFCNT_inc_simple_NN(av));
+
+#ifdef PERL_RC_STACK
+            assert(AvREAL(av));
+#else
+            assert(!AvREAL(av));
+#endif
+            assert(AvFILLp(av) == -1);
+
+            if (UNLIKELY(items - 1 > AvMAX(av))) {
+                SV **ary = AvALLOC(av);
+                Renew(ary, items, SV*);
+                AvMAX(av) = items - 1;
+                AvALLOC(av) = ary;
+                AvARRAY(av) = ary;
+            }
+
+            if (items > 0) {
+                SV ** const dst = AvARRAY(av);
+                SV ** const src = MARK + 1;
+                if (items <= 4) {
+                    dst[0] = src[0];
+                    if (items > 1) dst[1] = src[1];
+                    if (items > 2) dst[2] = src[2];
+                    if (items > 3) dst[3] = src[3];
+                }
+                else {
+                    Copy(src, dst, items, SV*);
+                }
+            }
+            AvFILLp(av) = items - 1;
+#ifdef PERL_RC_STACK
+            /* transfer ownership of the arguments' refcounts to av */
+            PL_stack_sp = MARK;
+#endif
+        }
+        if (UNLIKELY((cx->blk_u16 & OPpENTERSUB_LVAL_MASK) == OPpLVAL_INTRO &&
+            !CvLVALUE(cv)))
+            DIE(aTHX_ "Can't modify non-lvalue subroutine call of &%" SVf,
+                SVfARG(cv_name(cv, NULL, 0)));
+        if (UNLIKELY(depth == PERL_SUB_DEPTH_WARN
+                && (!PL_mt_fibers || cx->blk_sub.olddepth > 0)
+                && ckWARN(WARN_RECURSION)
+                && !(PERLDB_SUB && cv == GvCV(PL_DBsub))))
+            sub_crush_depth(cv);
+
+        /* inline OP_NEXTSTATE + OP_ARGCHECK fast path for
+         * signature subs when there are no pending signals, debugger hooks,
+         * or temporaries to flush. */
+        {
+            OP * const start = CvSTART(cv);
+            if (LIKELY(hasargs && start && start->op_type == OP_NEXTSTATE
+                       && start->op_next
+                       && start->op_next->op_type == OP_ARGCHECK
+                       && !PL_perldb
+                       && !PL_sig_pending
+                       && PL_tmps_ix <= PL_tmps_floor))
+            {
+                OP * const ac_op = start->op_next;
+                const struct op_argcheck_aux * const aux =
+                    (const struct op_argcheck_aux *)cUNOP_AUXx(ac_op)->op_aux;
+                const UV argc = (UV)items;
+                const UV params = aux->params;
+                const UV min_params = params - aux->opt_params;
+                const char slurpy = aux->slurpy;
+
+                if (LIKELY(argc >= min_params
+                           && (slurpy || argc <= params)
+                           && !(slurpy == '%' && argc > params
+                                && ((argc - params) & 1))))
+                {
+                    PL_curcop = (COP *)start;
+                    TAINT_NOT;
+                    return ac_op->op_next;
+                }
+            }
+            return start;
+        }
+    }
+    else {
+        SSize_t markix = TOPMARK;
+        bool is_scalar;
+        I32 saved_ix;
+
+        ENTER;
+        /* pretend we did the ENTER earlier */
+        PL_scopestack[PL_scopestack_ix - 1] = old_savestack_ix;
+
+        SAVETMPS;
+        saved_ix = PL_savestack_ix;
+
+        if (UNLIKELY((PL_op->op_private & OPpENTERSUB_LVAL_MASK)
+             && ((PL_op->op_private
+                  & CX_PUSHSUB_GET_LVALUE_MASK(Perl_is_lvalue_sub)
+                 ) & OPpENTERSUB_LVAL_MASK) == OPpLVAL_INTRO
+             && !CvLVALUE(cv)))
+            DIE(aTHX_ "Can't modify non-lvalue subroutine call of &%" SVf,
+                SVfARG(cv_name(cv, NULL, 0)));
+
+        if (UNLIKELY(!(PL_op->op_flags & OPf_STACKED) && GvAV(PL_defgv))) {
+            AV * const av = GvAV(PL_defgv);
+            const SSize_t items = AvFILL(av) + 1;
+
+            if (items) {
+                SSize_t i = 0;
+                const bool m = cBOOL(SvRMAGICAL(av));
+                rpp_extend(items);
+                for (; i < items; ++i)
+                {
+                    SV *sv;
+                    if (m) {
+                        SV ** const svp = av_fetch(av, i, 0);
+                        sv = svp ? *svp : NULL;
+                    }
+                    else
+                        sv = AvARRAY(av)[i];
+
+                    rpp_push_1(sv ? sv : av_nonelem(av, i));
+                }
+            }
+        }
+        else {
+            SV **mark = PL_stack_base + markix;
+            SSize_t items = PL_stack_sp - mark;
+            while (items--) {
+                mark++;
+                if (*mark && SvPADTMP(*mark)) {
+                    SV *oldsv = *mark;
+#ifdef PERL_RC_STACK
+                    /* skip mortalisation under RC stack */
+                    SV *newsv = newSVsv(oldsv);
+                    *mark = newsv;
+                    SvREFCNT_dec_NN(oldsv);
+#else
+                    SV *newsv = sv_mortalcopy(oldsv);
+                    *mark = newsv;
+#endif
+                }
+            }
+        }
+
+        if (UNLIKELY(PL_curcopdb)) {
+            SAVEVPTR(PL_curcop);
+            PL_curcop = PL_curcopdb;
+            PL_curcopdb = NULL;
+        }
+
+        is_scalar = (GIMME_V == G_SCALAR);
+
+        assert(CvXSUB(cv));
+
+        rpp_invoke_xs(cv);
+
+#ifdef PERL_USE_HWM
+        if (PL_curstackinfo->si_stack_hwm < PL_stack_sp - PL_stack_base)
+            Perl_croak_nocontext(
+                "panic: XSUB %s::%s (%s) failed to extend arg stack: "
+                "base=%p, sp=%p, hwm=%p\n",
+                    HvNAME(GvSTASH(CvGV(cv))), GvNAME(CvGV(cv)), CvFILE(cv),
+                    PL_stack_base, PL_stack_sp,
+                    PL_stack_base + PL_curstackinfo->si_stack_hwm);
+#endif
+        /* Enforce some sanity in scalar context. */
+        if (is_scalar) {
+            SV **svp = PL_stack_base + markix + 1;
+            if (svp != PL_stack_sp) {
+#ifdef PERL_RC_STACK
+                if (svp < PL_stack_sp) {
+                    SV* retsv = *PL_stack_sp;
+                    *PL_stack_sp = *svp;
+                    *svp = retsv;
+                    rpp_popfree_to_NN(svp);
+                }
+                else
+                    rpp_push_IMM(&PL_sv_undef);
+#else
+                *svp = svp > PL_stack_sp ? &PL_sv_undef : *PL_stack_sp;
+                PL_stack_sp = svp;
+#endif
+            }
+        }
+        PERL_UNUSED_VAR(saved_ix);
+        LEAVE;
+        return NORMAL;
+    }
+}
+
 PP(pp_entersub)
 {
     GV *gv;
     CV *cv;
-    PERL_CONTEXT *cx;
     I32 old_savestack_ix;
     SV *sv = *PL_stack_sp;
 
     if (UNLIKELY(!sv))
         goto do_die;
+
+    /* Freeze-time constant-sub folding guarded by overlay check */
+    if (UNLIKELY(PL_mt_hv_shadow != NULL)
+        && PL_mt_image && PL_mt_image->site_ic
+        && PL_sub_generation == PL_mt_image->base_sub_gen)
+    {
+        const struct perl_mt_site_ic * const site =
+            S_mt_site_ic_lookup(PL_mt_image, PL_op);
+        if (site && site->kind == MT_SITE_CONST_SUB
+            && (site->gp_id == U32_MAX || PL_mt_gp_table[site->gp_id] == NULL))
+        {
+            dMARK;
+            if (LIKELY(PL_stack_sp == MARK + 1)) {
+                rpp_replace_1_IMM_NN(site->sv);
+                return NORMAL;
+            }
+        }
+    }
 
     /* Locate the CV to call:
      * - most common case: RV->CV: f(), $ref->():
@@ -6210,7 +6716,17 @@ PP(pp_entersub)
                 goto do_default;
             /* FALLTHROUGH */
         case SVt_PVGV:
-            cv = GvCVu((const GV *)sv);
+            /* avoid materializing a worker GP copy on read-only
+             * CV lookup of an immortal GV when PL_mt_gp_table[id] is NULL. */
+            if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL) && PL_mt_gp_table) {
+                GP * const raw = GvGP_raw((const GV *)sv);
+                GP * const gp = (raw && PL_mt_gp_table[raw->gp_mt_id])
+                                ? PL_mt_gp_table[raw->gp_mt_id] : raw;
+                cv = (gp && !gp->gp_cvgen) ? gp->gp_cv : NULL;
+            }
+            else {
+                cv = GvCVu((const GV *)sv);
+            }
             if (UNLIKELY(!cv)) {
                 HV *stash;
                 cv = sv_2cv(sv, &stash, &gv, 0);
@@ -6253,23 +6769,14 @@ PP(pp_entersub)
         }
     }
 
-    /* At this point we want to save PL_savestack_ix, either by doing a
-     * cx_pushsub(), or for XS, doing an ENTER. But we don't yet know the final
-     * CV we will be using (so we don't know whether its XS, so we can't
-     * cx_pushsub() or ENTER yet), and determining cv may itself push stuff on
-     * the save stack. So remember where we are currently on the save
-     * stack, and later update the CX or scopestack entry accordingly. */
     old_savestack_ix = PL_savestack_ix;
 
-    /* these two fields are in a union. If they ever become separate,
-     * we have to test for both of them being null below */
     assert(cv);
     assert((void*)&CvROOT(cv) == (void*)&CvXSUB(cv));
     while (UNLIKELY(!CvROOT(cv))) {
         GV* autogv;
         SV* sub_name;
 
-        /* anonymous or undef'd function leaves us no recourse */
         if (CvLEXICAL(cv) && CvHASGV(cv))
             DIE(aTHX_ "Undefined subroutine &%" SVf " called",
                        SVfARG(cv_name(cv, NULL, 0)));
@@ -6277,11 +6784,9 @@ PP(pp_entersub)
             DIE(aTHX_ "Undefined subroutine called");
         }
 
-        /* autoloaded stub? */
         if (cv != GvCV(gv = CvGV(cv))) {
             cv = GvCV(gv);
         }
-        /* should call AUTOLOAD now? */
         else {
           try_autoload:
             autogv = gv_autoload_pvn(GvSTASH(gv), GvNAME(gv), GvNAMELEN(gv),
@@ -6298,241 +6803,8 @@ PP(pp_entersub)
         }
     }
 
-    /* unrolled "CvCLONE(cv) && ! CvCLONED(cv)" */
-    if (UNLIKELY((CvFLAGS(cv) & (CVf_CLONE|CVf_CLONED)) == CVf_CLONE))
-        DIE(aTHX_ "Closure prototype called");
-
-    if (UNLIKELY((PL_op->op_private & OPpENTERSUB_DB) && GvCV(PL_DBsub)
-            && !CvNODEBUG(cv)))
-    {
-         Perl_get_db_sub(aTHX_ &sv, cv);
-         if (CvISXSUB(cv))
-             PL_curcopdb = PL_curcop;
-         if (CvLVALUE(cv)) {
-             /* check for lsub that handles lvalue subroutines */
-             cv = GvCV(gv_fetchpvs("DB::lsub", GV_ADDMULTI, SVt_PVCV));
-             /* if lsub not found then fall back to DB::sub */
-             if (!cv) cv = GvCV(PL_DBsub);
-         } else {
-             cv = GvCV(PL_DBsub);
-         }
-
-        if (!cv || (!CvXSUB(cv) && !CvSTART(cv)))
-            DIE(aTHX_ "No DB::sub routine defined");
-    }
-
     rpp_popfree_1_NN(); /* finished with sv now */
-
-    if (!(CvISXSUB(cv))) {
-        /* This path taken at least 75% of the time   */
-        dMARK;
-        PADLIST *padlist;
-        I32 depth;
-        bool hasargs;
-        U8 gimme;
-
-        /* keep PADTMP args alive throughout the call (we need to do this
-         * because @_ isn't refcounted). Note that we create the mortals
-         * in the caller's tmps frame, so they won't be freed until after
-         * we return from the sub.
-         */
-        {
-            SV **svp = MARK;
-            while (svp < PL_stack_sp) {
-                SV *sv = *++svp;
-                if (!sv)
-                    continue;
-                if (SvPADTMP(sv)) {
-                    SV *newsv = sv_mortalcopy(sv);
-                    *svp = newsv;
-#ifdef PERL_RC_STACK
-                    /* should just skip the mortalisation instead */
-                    SvREFCNT_inc_simple_void_NN(newsv);
-                    SvREFCNT_dec_NN(sv);
-#endif
-                    sv = newsv;
-                }
-                SvTEMP_off(sv);
-            }
-        }
-
-        gimme = GIMME_V;
-        cx = cx_pushblock(CXt_SUB, gimme, MARK, old_savestack_ix);
-        hasargs = cBOOL(PL_op->op_flags & OPf_STACKED);
-        cx_pushsub(cx, cv, PL_op->op_next, hasargs);
-
-        padlist = CvPADLIST(cv);
-        if (UNLIKELY((depth = ++CvDEPTH(cv)) >= 2))
-            pad_push(padlist, depth);
-        PAD_SET_CUR_NOSAVE(padlist, depth);
-        if (LIKELY(hasargs)) {
-            AV *const av = MUTABLE_AV(PAD_SVl(0));
-            SSize_t items;
-            AV **defavp;
-
-            defavp = &GvAV(PL_defgv);
-            cx->blk_sub.savearray = *defavp;
-            *defavp = MUTABLE_AV(SvREFCNT_inc_simple_NN(av));
-
-            /* it's the responsibility of whoever leaves a sub to ensure
-             * that a clean, empty AV is left in pad[0]. This is normally
-             * done by cx_popsub() */
-
-#ifdef PERL_RC_STACK
-            assert(AvREAL(av));
-#else
-            assert(!AvREAL(av));
-#endif
-            assert(AvFILLp(av) == -1);
-
-            items = PL_stack_sp - MARK;
-            if (UNLIKELY(items - 1 > AvMAX(av))) {
-                SV **ary = AvALLOC(av);
-                Renew(ary, items, SV*);
-                AvMAX(av) = items - 1;
-                AvALLOC(av) = ary;
-                AvARRAY(av) = ary;
-            }
-
-            if (items)
-                Copy(MARK+1,AvARRAY(av),items,SV*);
-            AvFILLp(av) = items - 1;
-#ifdef PERL_RC_STACK
-            /* transfer ownership of the arguments' refcounts to av */
-            PL_stack_sp = MARK;
-#endif
-        }
-        if (UNLIKELY((cx->blk_u16 & OPpENTERSUB_LVAL_MASK) == OPpLVAL_INTRO &&
-            !CvLVALUE(cv)))
-            DIE(aTHX_ "Can't modify non-lvalue subroutine call of &%" SVf,
-                SVfARG(cv_name(cv, NULL, 0)));
-        /* warning must come *after* we fully set up the context
-         * stuff so that __WARN__ handlers can safely dounwind()
-         * if they want to
-         */
-        if (UNLIKELY(depth == PERL_SUB_DEPTH_WARN
-                && ckWARN(WARN_RECURSION)
-                && !(PERLDB_SUB && cv == GvCV(PL_DBsub))))
-            sub_crush_depth(cv);
-        return CvSTART(cv);
-    }
-    else {
-        SSize_t markix = TOPMARK;
-        bool is_scalar;
-
-        ENTER;
-        /* pretend we did the ENTER earlier */
-        PL_scopestack[PL_scopestack_ix - 1] = old_savestack_ix;
-
-        SAVETMPS;
-
-        if (UNLIKELY(((PL_op->op_private
-               & CX_PUSHSUB_GET_LVALUE_MASK(Perl_is_lvalue_sub)
-             ) & OPpENTERSUB_LVAL_MASK) == OPpLVAL_INTRO &&
-            !CvLVALUE(cv)))
-            DIE(aTHX_ "Can't modify non-lvalue subroutine call of &%" SVf,
-                SVfARG(cv_name(cv, NULL, 0)));
-
-        if (UNLIKELY(!(PL_op->op_flags & OPf_STACKED) && GvAV(PL_defgv))) {
-            /* Need to copy @_ to stack. Alternative may be to
-             * switch stack to @_, and copy return values
-             * back. This would allow popping @_ in XSUB, e.g.. XXXX */
-            AV * const av = GvAV(PL_defgv);
-            const SSize_t items = AvFILL(av) + 1;
-
-            if (items) {
-                SSize_t i = 0;
-                const bool m = cBOOL(SvRMAGICAL(av));
-                /* Mark is at the end of the stack. */
-                rpp_extend(items);
-                for (; i < items; ++i)
-                {
-                    SV *sv;
-                    if (m) {
-                        SV ** const svp = av_fetch(av, i, 0);
-                        sv = svp ? *svp : NULL;
-                    }
-                    else
-                        sv = AvARRAY(av)[i];
-
-                    rpp_push_1(sv ? sv : av_nonelem(av, i));
-                }
-            }
-        }
-        else {
-            SV **mark = PL_stack_base + markix;
-            SSize_t items = PL_stack_sp - mark;
-            while (items--) {
-                mark++;
-                if (*mark && SvPADTMP(*mark)) {
-                    SV *oldsv = *mark;
-                    SV *newsv = sv_mortalcopy(oldsv);
-                    *mark = newsv;
-#ifdef PERL_RC_STACK
-                    /* should just skip the mortalisation instead */
-                    SvREFCNT_inc_simple_void_NN(newsv);
-                    SvREFCNT_dec_NN(oldsv);
-#endif
-                }
-            }
-        }
-
-        /* We assume first XSUB in &DB::sub is the called one. */
-        if (UNLIKELY(PL_curcopdb)) {
-            SAVEVPTR(PL_curcop);
-            PL_curcop = PL_curcopdb;
-            PL_curcopdb = NULL;
-        }
-        /* Do we need to open block here? XXXX */
-
-        /* calculate gimme here as PL_op might get changed and then not
-         * restored until the LEAVE further down */
-        is_scalar = (GIMME_V == G_SCALAR);
-
-        /* CvXSUB(cv) must not be NULL because newXS() refuses NULL xsub address */
-        assert(CvXSUB(cv));
-
-        rpp_invoke_xs(cv);
-
-#ifdef PERL_USE_HWM
-        /* This duplicates the check done in runops_debug(), but provides more
-         * information in the common case of the fault being with an XSUB.
-         *
-         * It should also catch an XSUB pushing more than it extends
-         * in scalar context.
-        */
-        if (PL_curstackinfo->si_stack_hwm < PL_stack_sp - PL_stack_base)
-            Perl_croak_nocontext(
-                "panic: XSUB %s::%s (%s) failed to extend arg stack: "
-                "base=%p, sp=%p, hwm=%p\n",
-                    HvNAME(GvSTASH(CvGV(cv))), GvNAME(CvGV(cv)), CvFILE(cv),
-                    PL_stack_base, PL_stack_sp,
-                    PL_stack_base + PL_curstackinfo->si_stack_hwm);
-#endif
-        /* Enforce some sanity in scalar context. */
-        if (is_scalar) {
-            SV **svp = PL_stack_base + markix + 1;
-            if (svp != PL_stack_sp) {
-#ifdef PERL_RC_STACK
-                if (svp < PL_stack_sp) {
-                    /* move return value to bottom of stack frame
-                     * and free everything else */
-                    SV* retsv = *PL_stack_sp;
-                    *PL_stack_sp = *svp;
-                    *svp = retsv;
-                    rpp_popfree_to_NN(svp);
-                }
-                else
-                    rpp_push_IMM(&PL_sv_undef);
-#else
-                *svp = svp > PL_stack_sp ? &PL_sv_undef : *PL_stack_sp;
-                PL_stack_sp = svp;
-#endif
-            }
-        }
-        LEAVE;
-        return NORMAL;
-    }
+    return S_entersub_cv(aTHX_ cv, old_savestack_ix);
 }
 
 void
@@ -6837,21 +7109,158 @@ PP(pp_method)
         }								\
     }									\
 
-PP(pp_method_named)
+/* Check whether an immortal stash's overlay (shadow hash or MRO metadata
+ * cache_gen/pkg_gen) is still unmodified in the current worker. */
+PERL_STATIC_INLINE bool
+S_mt_stash_overlay_clean(pTHX_ HV *stash, U32 sid)
 {
-    GV* gv;
-    SV* const meth = cMETHOP_meth;
-    HV* const stash = opmethod_stash(meth);
+    if (UNLIKELY(PL_mt_hv_shadow[sid] != NULL))
+        return FALSE;
+    if (UNLIKELY(PL_mt_hv_aux && PL_mt_hv_aux[sid] != NULL)) {
+        const struct mro_meta * const wmeta = PL_mt_hv_aux[sid]->xhv_mro_meta;
+        const struct mro_meta * const rmeta = HvAUX_raw(stash)->xhv_mro_meta;
+        if (!wmeta || !rmeta
+            || wmeta->cache_gen != rmeta->cache_gen
+            || wmeta->pkg_gen   != rmeta->pkg_gen)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* O(1) overlay-validated method resolution cache for sealed boot
+ * images.  Valid while the stash's overlay and MRO cache_gen/pkg_gen are
+ * clean, the target glob has no per-worker GP override, and
+ * PL_sub_generation matches base_sub_gen. */
+STATIC CV *
+S_mt_method_ic_lookup(pTHX_ HV *stash, SV *meth)
+{
+    const struct perl_mt_image * const img = PL_mt_image;
+    U32 sid, hash, mask, slot;
+    STRLEN mlen;
+    const char *mpv;
+    bool mutf8;
+
+    if (!img || !img->meth_ic || !PL_mt_hv_shadow)
+        return NULL;
+    if (UNLIKELY(PL_sub_generation != img->base_sub_gen))
+        return NULL;
+    if (!(SvFLAGS(stash) & SVf_IMMORTAL) || !HvHasAUX(stash))
+        return NULL;
+    sid = HvMT_ID(HvAUX_raw(stash));
+    if (UNLIKELY(!S_mt_stash_overlay_clean(aTHX_ stash, sid)))
+        return NULL;
+    if (!SvPOKp(meth))
+        return NULL;
+
+    mpv = SvPVX_const(meth);
+    mlen = SvCUR(meth);
+    mutf8 = cBOOL(SvUTF8(meth));
+    if (SvIsCOW_shared_hash(meth))
+        hash = SvSHARED_HASH(meth);
+    else {
+        hash = 0;
+        PERL_HASH(hash, mpv, mlen);
+    }
+
+    mask = img->meth_ic_mask;
+    slot = (S_mt_ic_hash_ptr(stash) ^ hash) & mask;
+    while (img->meth_ic[slot].stash) {
+        const struct perl_mt_meth_ic * const e = &img->meth_ic[slot];
+        if (e->stash == stash && e->meth_hash == hash) {
+            SV * const em = e->meth;
+            if (em == meth
+                || (SvCUR(em) == mlen && cBOOL(SvUTF8(em)) == mutf8
+                    && memEQ(SvPVX_const(em), mpv, mlen)))
+            {
+                if (e->gp_id != U32_MAX && PL_mt_gp_table[e->gp_id] != NULL)
+                    return NULL;
+                return e->cv;
+            }
+        }
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+/* Resolve method CV for pp_method_named / Perl_pp_method_named_entersub
+ * using 8e devirtualised call-site cache -> 8d overlay-validated method IC ->
+ * standard Perl method cache / MRO lookup. */
+PERL_STATIC_INLINE CV *
+S_resolve_method_named_cv(pTHX_ SV *meth)
+{
+    GV *gv;
+    HV *stash;
+
+    /* devirtualised static class method call site */
+    if (UNLIKELY(PL_mt_hv_shadow != NULL)
+        && PL_mt_image && PL_mt_image->site_ic
+        && PL_sub_generation == PL_mt_image->base_sub_gen)
+    {
+        const struct perl_mt_site_ic * const site =
+            S_mt_site_ic_lookup(PL_mt_image, PL_op);
+        if (site && site->kind == MT_SITE_METH_DEVIRT
+            && S_mt_stash_overlay_clean(aTHX_ site->stash, site->stash_id)
+            && (site->gp_id == U32_MAX || PL_mt_gp_table[site->gp_id] == NULL))
+        {
+            SV ** const mark = PL_stack_base + TOPMARK;
+            if (LIKELY(mark < PL_stack_sp && mark[1] == site->class_sv))
+                return MUTABLE_CV(site->sv);
+        }
+    }
+
+    stash = opmethod_stash(meth);
 
     if (LIKELY(SvTYPE(stash) == SVt_PVHV)) {
-        METHOD_CHECK_CACHE(stash, stash, meth);
+        /* overlay-validated inline cache on immortal stashes */
+        if (UNLIKELY(PL_mt_hv_shadow != NULL)) {
+            CV * const cached = S_mt_method_ic_lookup(aTHX_ stash, meth);
+            if (cached)
+                return cached;
+        }
+        {
+            const HE * const he = hv_fetch_ent(stash, meth, 0, 0);
+            if (he) {
+                gv = MUTABLE_GV(HeVAL(he));
+                if (isGV(gv) && GvCV(gv) && (!GvCVGEN(gv) || GvCVGEN(gv)
+                     == (PL_sub_generation + HvMROMETA(stash)->cache_gen)))
+                {
+                    return GvCV(gv);
+                }
+            }
+        }
     }
 
     gv = gv_fetchmethod_sv_flags(stash, meth, GV_AUTOLOAD|GV_CROAK);
     assert(gv);
+    return isGV(gv) ? GvCV(gv) : MUTABLE_CV(gv);
+}
 
-    rpp_xpush_1(isGV(gv) ? MUTABLE_SV(GvCV(gv)) : MUTABLE_SV(gv));
+PP(pp_method_named)
+{
+    SV * const meth = cMETHOP_meth;
+    CV * const cv = S_resolve_method_named_cv(aTHX_ meth);
+    rpp_xpush_1(MUTABLE_SV(cv));
     return NORMAL;
+}
+
+/* fused method_named + entersub superinstruction.
+ * Resolves the method CV without pushing/popping it on the value stack and
+ * dispatches directly into S_entersub_cv() with PL_op advanced to entersub. */
+OP *
+Perl_pp_method_named_entersub(pTHX)
+{
+    SV * const meth = cMETHOP_meth;
+    OP * const entersub_op = PL_op->op_next;
+    const I32 old_savestack_ix = PL_savestack_ix;
+    CV * const cv = S_resolve_method_named_cv(aTHX_ meth);
+
+    PL_op = entersub_op;
+    if (UNLIKELY(!cv || !CvROOT(cv))) {
+        /* Stub or unusual CV: hand off via standard pp_entersub path */
+        rpp_xpush_1(MUTABLE_SV(cv));
+        return PL_ppaddr[OP_ENTERSUB](aTHX);
+    }
+    return S_entersub_cv(aTHX_ cv, old_savestack_ix);
 }
 
 PP(pp_method_super)

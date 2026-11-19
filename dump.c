@@ -466,7 +466,10 @@ Perl_sv_peek(pTHX_ SV *sv)
         sv_catpvs(t, "VOID");
         goto finish;
     }
-    else if (sv == (const SV *)0x55555555 || ((char)SvTYPE(sv)) == 'U') {
+    else if (sv == (const SV *)0x55555555
+             /* perl5-mt: the poison pattern lives in the low byte of the
+              * flags; SvTYPE() is only 5 bits wide now */
+             || ((char)(SvFLAGS(sv) & 0xff)) == 'U') {
         /* detect data corruption under memory poisoning */
         sv_catpvs(t, "WILD");
         goto finish;
@@ -1740,6 +1743,7 @@ Perl_do_gvgv_dump(pTHX_ I32 level, PerlIO *file, const char *name, GV *sv)
 }
 
 const struct flag_to_name first_sv_flags_names[] = {
+    {SVf_IMMORTAL, "IMMORTAL,"},
     {SVs_TEMP, "TEMP,"},
     {SVs_OBJECT, "OBJECT,"},
     {SVs_GMG, "GMG,"},
@@ -1782,7 +1786,9 @@ const struct flag_to_name cv_flags_names[] = {
     {CVf_SIGNATURE,        "SIGNATURE,"},
     {CVf_REFCOUNTED_ANYSV, "REFCOUNTED_ANYSV,"},
     {CVf_IsMETHOD,         "IsMETHOD,"},
-    {CVf_XS_RCSTACK,       "XS_RCSTACK,"}
+    {CVf_XS_RCSTACK,       "XS_RCSTACK,"},
+    {CVf_MT_THREADSAFE,    "MT_THREADSAFE,"},
+    {CVf_MT_REMOTE,        "MT_REMOTE,"}
 };
 
 const struct flag_to_name hv_flags_names[] = {
@@ -1967,10 +1973,12 @@ Perl_do_sv_dump(pTHX_ I32 level, PerlIO *file, SV *sv, I32 nest, I32 maxnest, bo
         break;
 
     case SVt_PVAV:
+        if (flags & SVf_PACKED_AV)
+            sv_catpvs(d, "PACKED_AV,");
         break;
     }
-    /* SVphv_SHAREKEYS is also 0x20000000 */
-    if ((type != SVt_PVHV) && SvUTF8(sv))
+    /* SVphv_SHAREKEYS and SVf_PACKED_AV are also 0x20000000 */
+    if ((type != SVt_PVHV) && (type != SVt_PVAV) && SvUTF8(sv))
         sv_catpvs(d, "UTF8");
 
     if (*(SvEND(d) - 1) == ',') {

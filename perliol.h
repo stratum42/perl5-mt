@@ -115,6 +115,8 @@ EXTCONST PerlIO_funcs PerlIO_byte;
 EXTCONST PerlIO_funcs PerlIO_raw;
 EXTCONST PerlIO_funcs PerlIO_pending;
 PERL_CALLCONV PerlIO *PerlIO_allocate(pTHX);
+/* perl5-mt: the :async layer (perlio_async.c) */
+extern PERLIO_FUNCS_DECL(PerlIO_async);
 PERL_CALLCONV SV *PerlIO_arg_fetch(PerlIO_list_t *av, IV n);
 #define PerlIOArg PerlIO_arg_fetch(layers,n)
 

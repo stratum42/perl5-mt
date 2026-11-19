@@ -18,33 +18,177 @@ third-party modules.
 
 For an introduction to the language's features, see pod/perlintro.pod.
 
-For a discussion of the important changes in this release, see
-pod/perldelta.pod.
+For a discussion of the upstream 5.40.2 release, see pod/perldelta.pod.
 
 There are also many Perl books available, covering a wide variety of topics,
 from various publishers.  See pod/perlbook.pod for more information.
 
 
+# ABOUT PERL5-MT
+
+`perl5-mt` is a standalone fork of Perl 5.40.2.  It asks a simple, practical
+question: what happens if Perl can use all the cores on a modern machine,
+keep its memory footprint honest, and still run thirty years of Perl 5 and
+CPAN code without making you rewrite your life's work?
+
+Stock Perl's `ithreads` model works by cloning the entire interpreter tree for
+every thread, which is faithful to Perl's semantics and unkind to your RAM
+and startup time.  `perl5-mt` takes a different path.  Your program compiles
+and runs its `BEGIN` and `INIT` blocks as usual, and then seals the compiled
+interpreter (op trees, subs, stashes, and regex programs) into a read-only
+boot image protected by hardware memory protection keys or `mprotect`.
+Worker threads share that image in the same address space and keep only
+their own pads, globs, and stash overlays private.
+
+Because the real world is full of CPAN XS modules that were never written
+with threads in mind, `perl5-mt` splits XS into two tiers.  Modules built
+thread-safe run directly in-process in every worker.  Everything else runs
+transparently in out-of-process XS compartments over shared-memory rings,
+so an uncooperative C library cannot corrupt your workers, and if it crashes,
+the compartment takes the fall and your workers get a clean exception.
+
+Around that core, `perl5-mt` adds cooperative stackful fibers (`MT::Fiber`),
+kernel-async I/O (`:async` over `io_uring` or `kqueue`), channels, cells,
+and shared hashes (`MT::Channel`, `MT::Cell`, `MT::SharedHash`), fail-fast
+supervision (`MT::Fault`, `MT::Supervisor`), SwissTable hashes behind `HV`,
+opt-in packed typed arrays (`MT::Array`), dual-gated SIMD string and regex
+kernels, cross-host bit-identical binary64 and decimal128 numerics
+(`core-math`, `MT::Decimal`), an extensible hardware offload layer
+(`accel/`), and VM call/specialisation optimizations that preserve
+`B::Deparse` output.
+
+Every acceleration path carries a scalar twin and a runtime kill-switch
+(`PERL_FORCE_SCALAR=1`, `PERL_ACCEL=off`, `PERL_MT_NO_SPECIALIZE=1`), so
+when something looks suspicious you can always ask the boring code path for
+a second opinion.
+
+Here is what `MT::Pool`, `MT::Fiber`, and `MT::Array` look like together:
+
+    use v5.40;
+    use MT::Pool;
+    use MT::Fiber;
+    use MT::Array;
+
+    sub score_batch ($n) {
+        my @f = map {
+            my $s = $_;
+            MT::Fiber::schedule(sub { my $t = 0; $t += ($_ + $s) * 0.25 for 1..$n; $t });
+        } 1 .. 4;
+        MT::Fiber::run();
+        my $sum = 0; $sum += MT::Fiber::join($_) for @f;
+        return $sum;
+    }
+
+    my $pool = MT::Pool->new(workers => 4);
+    my @sums = $pool->map(\&score_batch, 100, 200, 300, 400);
+    $pool->shutdown;
+    say "total: ", MT::Array::sum(MT::Array::packed("NV", @sums));
+
+
+# MEASURED NUMBERS
+
+Numbers are better than promises.  The table below summarizes reproducible
+runs of `./perl -I. -Ilib tools/bench-suite.pl` on two hardware-verified
+systems: an Apple M2 Max (macOS arm64, 12 cores, `NEON` + `Accelerate`) and
+an Intel Core Ultra 7 265K (Linux x86_64, 20 cores, `AVX2`).  Every numeric
+and SIMD row is checked for bit-for-bit parity against its scalar reference.
+
+| Workload | Apple M2 Max (`macOS arm64`) | Core Ultra 7 265K (`Linux x86_64`) |
+|---|---|---|
+| 36 SIMD string / UTF-8 / regex kernels | 1.93x geomean, 17.52x peak | 3.01x geomean, 17.34x peak |
+| `MT::Array` 131k `sum` / `axpy` / `dot_i8` vs pure Perl | 11.9x / 13.2x / 587.1x | 1.2x / 10.5x / 563.8x |
+| SwissTable `HV` 100k `iterate` / `miss_lookup` | 1.19x / 1.14x | 1.23x / 1.19x |
+| Frozen VM `static_method` / `mixed_hot_loop` | 1.49x / 1.20x | 1.60x / 1.21x |
+| 8-worker `MT::Pool` startup (32 MiB image) vs `ithreads` | 8.95 ms (4.86x faster) | 12.81 ms (10.01x faster) |
+| `MT::Fiber` switch & 8W x 4F scaling | 340.1 ns (6.22x at 8W) | 184.2 ns (5.96x at 8W) |
+| `MT::PDLBridge` 524k `f64` 4W shm vs 1T scalar | 35.96x (4.50 ms) | 21.66x (4.10 ms) |
+| `MT::Channel` cross-worker ping-pong RTT | 1.31 us (762k trips/s) | 1.48 us (676k trips/s) |
+
+Building with `-Dusepgo -Dusenative` (`make pgo`) on Apple M2 Max adds a
+further 1.07x to 1.51x across the suite, bringing 8-worker pool throughput
+from 2,939.6 to 3,614.3 ops/s and 32-fiber throughput from 43,732 to
+61,906 items/s, while keeping the exact same cross-host SHA-256 numeric digest
+(`3cc524ed2f4a700c9d6bfe6047d8d6cecfaea84c3e7fe74747ad4f9e70d0271b`) across
+macOS `arm64` (`clang`) and Linux `x86_64` (`gcc`).
+
+Full tables, methodology, caveats, and reproduction commands live in
+[MT_BENCH.md](MT_BENCH.md).
+
+
+# PLATFORM STATUS
+
+To keep expectations honest:
+
+- **Hardware-verified today**: `macOS arm64` (Apple Silicon, `NEON` +
+  `Accelerate` + `kqueue`) and `Linux x86_64` (`AVX2`, `io_uring`, memory
+  protection keys), both passing the full Perl core regression suite,
+  `t/mt/*.t`, `krt`, `accel`, and cross-host `t/mt/num_digest.t` parity.
+  Earlier runs were also hardware-verified on `Linux ppc64le` (POWER8,
+  `VSX`).
+- **Software-complete, community testing welcome**: `Linux ppc64le`,
+  `Linux arm64`, `Linux s390x`, `macOS x86_64`, **AIX 7.x** (`ppc64`
+  XCOFF/TOC), **IBM i PASE** (`ppc64`), **z/OS USS** (`s390x` LP64 and
+  XPLINK-64, Enhanced ASCII and EBCDIC), and additional offload backends
+  (`Apple Metal`, `ANE`, `Mesa OpenCL` on AMD/Intel GPUs, `Intel NPU`,
+  `AMD NPU`, `POWER NX`, and `IBM z16/Telum II NNPA`).  The native `krt/`,
+  `mt_ctx_*.c`, `hints/`, and `accel/` backends are in the tree; if you have
+  access to any of that hardware, build logs and test reports are warmly
+  welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+
+# DOCUMENTATION
+
+- [MT_README.md](MT_README.md) -- Build guide, subsystem reference,
+  environment variables, error codes, and known limits.
+- [MT_DESIGN.md](MT_DESIGN.md) -- Architecture, memory model, XS compartment
+  wire protocol, deterministic numerics contract, and platform layer.
+- [MT_BENCH.md](MT_BENCH.md) -- Reproducible benchmarks and cross-host
+  SHA-256 determinism results.
+- [CONTRIBUTING.md](CONTRIBUTING.md) -- Engineering invariants, test suites,
+  and platform testing notes.
+
+
 # INSTALLATION
 
-If you're using a relatively modern operating system and want to
-install this version of Perl locally, run the following commands:
+On Linux (GCC 15+ defaults to C23, so pass `-std=gnu17`; `-Ud_thread_local`
+is required on Linux so `libperl` and extensions avoid static TLS):
 
-    ./Configure -des -Dprefix=$HOME/localperl
-    make test
+    ./Configure -des -Dusethreads -Ud_thread_local \
+        -Dprefix=$HOME/localperl -Accflags='-std=gnu17' -Doptimize='-O2 -g'
+    make -j$(nproc)
+    TEST_JOBS=$(nproc) make test_harness
     make install
 
-This will configure and compile perl for your platform, run the regression
-tests, and install perl in a subdirectory "localperl" of your home directory.
+On macOS:
 
-If you run into any trouble whatsoever or you need to install a customized
-version of Perl, you should read the detailed instructions in the "INSTALL"
-file that came with this distribution.  Additionally, there are a number of
-"README" files with hints and tips about building and using Perl on a wide
-variety of platforms, some more common than others.
+    ./Configure -des -Dusethreads -Dprefix=$HOME/localperl -Doptimize='-O2 -g'
+    make -j$(sysctl -n hw.ncpu)
+    TEST_JOBS=$(sysctl -n hw.ncpu) make test_harness
+    make install
 
-Once you have Perl installed, a wealth of documentation is available to you
-through the 'perldoc' tool.  To get started, run this command:
+For a Profile-Guided Optimization build (add `-Dusenative` if the binary
+only needs to run on the build machine):
+
+    ./Configure -des -Dusethreads -Ud_thread_local \
+        -Dprefix=$HOME/localperl -Accflags='-std=gnu17' -Dusepgo
+    make -j$(nproc) pgo
+
+On macOS, drop `-Ud_thread_local` and `-Accflags='-std=gnu17'` from the
+PGO configure line.
+
+To run the standalone kernel-runtime, acceleration, and multi-threading
+test suites:
+
+    make -C krt test
+    make -C accel test
+    ./perl -I. -Ilib -MTest::Harness -e 'runtests(@ARGV)' t/mt/*.t
+
+If you run into any trouble whatsoever or need a customized build, read the
+detailed instructions in the `INSTALL` file and the platform `README.*`
+files that came with this distribution.
+
+Once you have Perl installed, a wealth of documentation is available through
+the `perldoc` tool:
 
     perldoc perl
 
@@ -52,26 +196,31 @@ through the 'perldoc' tool.  To get started, run this command:
 # IF YOU RUN INTO TROUBLE
 
 Perl is a large and complex system that's used for everything from
-knitting to rocket science.  If you run into trouble, it's quite
-likely that someone else has already solved the problem you're
-facing. Once you've exhausted the documentation, please report bugs to us
-at the GitHub issue tracker at https://github.com/Perl/perl5/issues
+knitting to rocket science.  If you run into trouble with `perl5-mt`
+features, please check `MT_README.md` and `MT_DESIGN.md` first and open an
+issue with your platform, compiler, and test output.  For upstream Perl 5
+issues and releases, see https://github.com/Perl/perl5/issues and
+https://www.cpan.org/src/.
 
-While it was current when we made it available, Perl is constantly evolving
-and there may be a more recent version that fixes bugs you've run into or
-adds new features that you might find useful.
+If you want to submit a patch to the perl source, see `CONTRIBUTING.md` and
+the "SUPER QUICK PATCH GUIDE" in `pod/perlhack.pod`.
 
-You can always find the latest version of perl on a CPAN (Comprehensive Perl
-Archive Network) site near you at https://www.cpan.org/src/
-
-If you want to submit a simple patch to the perl source, see the "SUPER
-QUICK PATCH GUIDE" in pod/perlhack.pod.
+# A NOTE FROM LARRY WALL (UPSTREAM PERL)
 
 Just a personal note:  I want you to know that I create nice things like this
 because it pleases the Author of my story.  If this bothers you, then your
 notion of Authorship needs some revision.  But you can use perl anyway. :-)
 
 The author.
+
+
+# A NOTE ON PERL5-MT
+
+Perl has enabled me to do so much, and I created perl5-mt as a way to make
+my life easier. If it helps you make your life easier, that's the only thanks
+I need. I am one person, I can't commit to maintaining or extending perl5-mt
+beyond my own needs, but my hope is the community will accept it as a
+continuation of the spirit of Authorship.
 
 
 # LICENSING

@@ -297,7 +297,11 @@ struct pmop {
 };
 
 #ifdef USE_ITHREADS
-#define PM_GETRE(o)	(SvTYPE(PL_regex_pad[(o)->op_pmoffset]) == SVt_REGEXP \
+/* perl5-mt: a worker's regex pad starts out pointing at the immortal
+ * regexps of the boot image; the first use of one copies it into the
+ * worker (the head holds match state), see Perl_mt_pm_getre in inline.h */
+#define PM_GETRE(o)	Perl_mt_pm_getre(aTHX_ (o))
+#define PM_GETRE_raw(o)	(SvTYPE(PL_regex_pad[(o)->op_pmoffset]) == SVt_REGEXP \
                          ? (REGEXP*)(PL_regex_pad[(o)->op_pmoffset]) : NULL)
 /* The assignment is just to enforce type safety (or at least get a warning).
  */
@@ -642,13 +646,10 @@ typedef enum {
 #endif
 
 #define OpREFCNT_set(o,n)		((o)->op_targ = (n))
-#ifdef PERL_DEBUG_READONLY_OPS
-#  define OpREFCNT_inc(o)		Perl_op_refcnt_inc(aTHX_ o)
-#  define OpREFCNT_dec(o)		Perl_op_refcnt_dec(aTHX_ o)
-#else
-#  define OpREFCNT_inc(o)		((o) ? (++(o)->op_targ, (o)) : NULL)
-#  define OpREFCNT_dec(o)		(--(o)->op_targ)
-#endif
+/* perl5-mt: always functions, so that ops in a sealed slab are never
+ * written to (their count stays above zero for ever) */
+#define OpREFCNT_inc(o)		Perl_op_refcnt_inc(aTHX_ o)
+#define OpREFCNT_dec(o)		Perl_op_refcnt_dec(aTHX_ o)
 
 /* flags used by Perl_load_module() */
 #define PERL_LOADMOD_DENY		0x1	/* no Module */
@@ -744,9 +745,10 @@ struct opslab {
     U16         opslab_free_space;	/* space available in this slab
                                            for allocating new ops (in ptr
                                            units) */
-# ifdef PERL_DEBUG_READONLY_OPS
-    bool	opslab_readonly;
-# endif
+    bool	opslab_readonly;	/* perl5-mt: sealed (boot image) or
+                                           mprotected (PERL_DEBUG_READONLY_OPS);
+                                           its ops are never freed or written */
+    bool	opslab_mt_arena;	/* perl5-mt: lives in the freeze arena */
     OPSLOT	opslab_slots;		/* slots begin here */
 };
 
@@ -764,13 +766,16 @@ struct opslab {
 #define OpSLOToff(slab, offset) \
     ((OPSLOT*)(((I32 **)&(slab)->opslab_slots)+(offset)))
 
+/* perl5-mt: a sealed slab is never counted down nor freed */
 # define OpslabREFCNT_dec(slab)      \
-        (((slab)->opslab_refcnt == 1) \
+        ((slab)->opslab_readonly ? (void)0 : \
+         ((slab)->opslab_refcnt == 1) \
          ? opslab_free_nopad(slab)     \
          : (void)--(slab)->opslab_refcnt)
   /* Variant that does not null out the pads */
 # define OpslabREFCNT_dec_padok(slab) \
-        (((slab)->opslab_refcnt == 1)  \
+        ((slab)->opslab_readonly ? (void)0 : \
+         ((slab)->opslab_refcnt == 1)  \
          ? opslab_free(slab)		\
          : (void)--(slab)->opslab_refcnt)
 #endif
@@ -1171,6 +1176,21 @@ struct op_argcheck_aux {
 };
 
 #define MI_INIT_WORKAROUND_PACK "Module::Install::DSL"
+
+/* fused superinstruction PP functions (implemented in pp_hot.c,
+ * wired by the peephole/finalization pass in op.c while preserving op_type
+ * and op_next for B::Deparse compatibility). */
+#ifdef PERL_CORE
+PERL_CALLCONV OP *Perl_pp_eq_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_ne_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_lt_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_gt_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_le_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_ge_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_defined_cond(pTHX);
+PERL_CALLCONV OP *Perl_pp_method_named_entersub(pTHX);
+PERL_CALLCONV OP *Perl_pp_shift_padsv_store(pTHX);
+#endif
 
 
 /*

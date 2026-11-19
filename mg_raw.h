@@ -52,6 +52,8 @@
       "/* dbfile 'L' Debugger %_<filename */" },
     { 'l', "want_vtbl_dbline",
       "/* dbline 'l' Debugger %_<filename element */" },
+    { 'M', "want_vtbl_mt_cap",
+      "/* mt_cap 'M' perl5-mt capability handle */" },
     { 'o', "want_vtbl_collxfrm | PERL_MAGIC_VALUE_MAGIC",
       "/* collxfrm 'o' Locale transformation */" },
     { 'P', "want_vtbl_pack | PERL_MAGIC_VALUE_MAGIC",

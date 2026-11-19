@@ -213,16 +213,66 @@ C<&PL_sv_zero>. Introduced in 5.28.
 =cut
 */
 
-#ifdef MULTIPLICITY
-PERLVAR(I, sv_yes,	SV)
-PERLVAR(I, sv_undef,	SV)
-PERLVAR(I, sv_no,	SV)
-PERLVAR(I, sv_zero,	SV)
-#else
-/* store the immortals as an array to ensure they are contiguous in
- * memory: makes SvIMMORTAL_INTERP(sv) possible */
-PERLVARA(I, sv_immortals, 4, SV)
-#endif
+/* perl5-mt: where SvREFCNT_inc/dec of an immortal SV lands
+ * (see MT_REFCNT_TARGET in sv.h); per interpreter so that worker threads
+ * never share the cache line. */
+PERLVARI(I, mt_refcnt_sink, U32, 0)
+
+/* perl5-mt: per-worker state of the CVs in the boot image.
+ * Only set in worker interpreters; indexed by CvMTID(cv). */
+PERLVARI(I, mt_ncv, U32, 0)		/* number of CVs in the boot image */
+PERLVAR(I, mt_cv_depth, I32 *)		/* recursion depth of each image CV */
+PERLVAR(I, mt_padlists, PADLIST **)	/* padlist of each image CV, built
+                                           lazily from the frozen template */
+
+/* perl5-mt: per-worker state of the GVs and HVs in the boot
+ * image, the worker's copies of image data, and the eval/require overlay
+ * (the shadow hashes that receive stores into frozen hashes). */
+PERLVARI(I, mt_ngp, U32, 0)		/* number of GPs in the boot image */
+PERLVAR(I, mt_gp_table, GP **)		/* this worker's GP of each image GV */
+PERLVAR(I, mt_gv_flags, STRLEN *)		/* this worker's GvFLAGS of each */
+PERLVARI(I, mt_nhv, U32, 0)		/* number of HVs in the boot image */
+PERLVAR(I, mt_hv_aux, struct xpvhv_aux **) /* per-worker aux copies */
+PERLVAR(I, mt_hv_shadow, HV **)		/* the overlay: per-worker shadows */
+PERLVAR(I, mt_hv_amt, MAGIC **)		/* per-worker overload tables */
+PERLVAR(I, mt_clone_param, CLONE_PARAMS *) /* image -> worker copying */
+PERLVAR(I, mt_clone_stashes, AV *)	/* image: stashes with a CLONE method */
+PERLVAR(I, mt_ptr_table, PTR_TBL_t *)	/* image address -> worker copy */
+PERLVARI(I, mt_worker_id, U32, 0)	/* 0: the main interpreter */
+/* perl5-mt: fibers (mt_fiber.c) */
+PERLVAR(I, mt_fiber_current, struct mt_fiber *)	/* NULL on the main context */
+PERLVAR(I, mt_fiber_main, struct mt_fiber *)	/* record of the original stack */
+PERLVAR(I, mt_fibers, HV *)		/* live fibers, keyed by their id */
+PERLVAR(I, mt_fiber_free_stacks, struct mt_fiber *) /* parked records */
+PERLVARI(I, mt_fiber_next_id, UV, 1)	/* sequence part of the next id */
+PERLVARI(I, mt_fiber_nfree, U32, 0)	/* parked records with a stacklet */
+PERLVARI(I, mt_fiber_nmapped, U32, 0)	/* stacklets mapped right now */
+PERLVARI(I, mt_fiber_peak, U32, 0)	/* most stacklets mapped at once */
+PERLVARI(I, mt_fiber_mmaps, U32, 0)	/* mmap calls for stacklets, ever */
+/* perl5-mt: the fiber scheduler (mt_fiber.c).  The ready queue is
+ * intrusive, through next_ready of the records. */
+PERLVAR(I, mt_sched_head, struct mt_fiber *) /* ready queue: first */
+PERLVAR(I, mt_sched_tail, struct mt_fiber *) /* ready queue: last */
+PERLVARI(I, mt_sched_nready, U32, 0)	/* fibers on the ready queue */
+PERLVARI(I, mt_sched_nparked, U32, 0)	/* scheduled fibers parked */
+PERLVARI(I, mt_sched_pending, int, 0)	/* a wake asks for a tick */
+PERLVARI(I, mt_sched_preempt, int, 0)	/* the tick may switch fibers */
+PERLVARI(I, mt_sched_idle_hook, mt_sched_idle_proc_t, NULL) /* empty queue */
+PERLVARI(I, mt_sched_poll_hook, mt_sched_idle_proc_t, NULL) /* each round of the loop:
+                                           never blocks (remote replies)   */
+PERLVAR(I, mt_sched_prev_signalhook, despatch_signals_proc_t) /* chained */
+PERLVAR(I, mt_sched_fiber, struct mt_fiber *) /* the loop's context, or NULL */
+PERLVARI(I, mt_sched_results, HV *, NULL) /* finished, not yet joined */
+PERLVARI(I, mt_sched_nfinished, U32, 0)	/* finished by the last run */
+PERLVARI(I, mt_sched_ticks, U32, 0)	/* ticks that switched fibers */
+PERLVARI(I, eval_overlay_active, bool, FALSE) /* this is a worker: stores
+                                           into frozen stashes go to the
+                                           overlay */
+
+/* perl5-mt: the four immortals are process globals (PL_sv_immortals[] in
+ * perlvars.h) so that every interpreter in the process, including the
+ * worker interpreters that share a sealed boot image, sees them at the same
+ * address.  PL_sv_yes/undef/no/zero are aliases defined in perl.h. */
 
 PERLVAR(I, padname_undef,	PADNAME)
 PERLVAR(I, padname_const,	PADNAME)
@@ -1099,6 +1149,47 @@ PERLVAR(I, prevailing_version, U16)
 
 /* If you are adding a U8 or U16, check to see if there are 'Space' comments
  * above on where there are gaps which currently will be structure padding.  */
+
+/* perl5-mt: the two-tier XS dispatcher.  Appended here so that XS
+ * modules built against earlier headers of this fork keep their offsets. */
+PERLVARI(I, mt_boot_safe, int, 0)	/* a PERL_XS_THREADSAFE boot is running:
+                                           newXS stamps CVf_MT_THREADSAFE */
+PERLVARI(I, mt_boot_safe_sym, void *, NULL) /* the boot symbol dl_find_symbol
+                                           found a marker for */
+PERLVARI(I, mt_boot_pkg, const char *, NULL) /* the module whose bootstrap
+                                           is running (MY_CXT bookkeeping) */
+PERLVARI(I, mt_xs_newxs_log, AV *, NULL)	/* compartment: XSUBs defined
+                                           while a frame is served */
+PERLVARI(I, mt_xs_slot, I32, -1)	/* this worker's bridge slot */
+PERLVARI(I, mt_xs_comp, I32, -1)	/* the compartment it is bound to */
+PERLVARI(I, mt_hv_amagic, U8 *, NULL)	/* per-worker HvAMAGIC of image stashes */
+PERLVARI(I, mt_xs_hh, AV *, NULL)	/* host code refs pinned for compartments */
+/* perl5-mt: the bridge on the vectors.  The scheduled fibers that
+ * are parked on a remote call (linked through next_xs_waiter), the calls
+ * this worker has in flight from fibers, the adaptive budget of its waits,
+ * and the CPU it is pinned to (-1 not decided, -2 not pinned). */
+PERLVARI(I, mt_xs_waiters, struct mt_fiber *, NULL)
+PERLVARI(I, mt_xs_inflight, U32, 0)
+PERLVAR(I, mt_xs_poll, perl_krt_poll_policy_t)
+PERLVARI(I, mt_xs_pinned, I32, -1)
+PERLVARI(I, mt_xs_gated, I32, 0)	/* new calls held back for the arena */
+/* perl5-mt: the :async layer and the aio completions (perlio_async.c,
+   the idle hook in mt_fiber.c) */
+PERLVAR(I, mt_aio, perl_krt_aio_t *)	/* krt aio ring of this interpreter, made
+					 * on first use; NULL before */
+PERLVAR(I, mt_aio_shm, perl_krt_shm_t *)	/* registered buffers of the ring */
+PERLVARI(I, mt_aio_bufs_free, U32, 0)	/* bit i set: buffer i is free */
+PERLVARI(I, mt_aio_next_key, UV, 1)	/* user_data of the next operation */
+PERLVAR(I, mt_aio_waiters, struct mt_fiber *)	/* parked scheduled fibers */
+PERLVARI(I, mt_aio_pending, U32, 0)	/* operations submitted, not completed */
+PERLVARI(I, mt_aio_sync_key, UV, 0)	/* the operation a thread waits for (0: none) */
+PERLVAR(I, mt_aio_sync_cqe, perl_krt_cqe_t)	/* its completion */
+PERLVARI(I, mt_aio_nsubmit, U32, 0)	/* operations submitted, ever */
+PERLVARI(I, mt_aio_ndone, U32, 0)	/* completions delivered, ever */
+PERLVARI(I, mt_aio_nparked, U32, 0)	/* operations a fiber parked on */
+PERLVARI(I, mt_aio_nsync, U32, 0)	/* operations a thread drained itself */
+/* perl5-mt: channels (mt_chan.c): the fibers parked on one */
+PERLVAR(I, mt_chan_waiters, struct mt_fiber *)
 
 /* Within a stable branch, new variables must be added to the very end, before
  * this comment, for binary compatibility (the offsets of the old members must

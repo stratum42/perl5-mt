@@ -559,7 +559,7 @@ unless (@ARGV) {
     # then we know we can -MTestInit for everything else, making life simpler
 
     # NOTE that _find_tests() is recursive, unlike what test_harness uses.
-    foreach my $dir (qw(base comp run cmd io re opbasic op uni mro class perf test_pl)) {
+    foreach my $dir (qw(base comp run cmd io re opbasic op uni mro class mt perf test_pl)) {
 	_find_tests($dir);
     }
     unless ($::core) {
@@ -616,6 +616,7 @@ unless (@ARGV) {
 	"uni",
 	"mro",
 	"class",
+	"mt",
 	"lib",
 	"ext",
 	"dist",

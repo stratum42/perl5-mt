@@ -19,8 +19,14 @@ configpm				Produces lib/Config.pm
 Configure				Portability tool
 configure.com				Configure-equivalent for VMS
 configure.gnu				Crude emulation of GNU configure
+CONTRIBUTING.md				Contribution guidelines
 cop.h					Control operator header
 Copying					The GNU General Public License
+core-math/cr_fp256.h			Extended-precision accumulator for correctly-rounded math
+core-math/cr_libm.h			Correctly-rounded elementary math functions
+core-math/mt_nan.h			Canonical quiet NaN helpers
+core-math/mt_parse_nv.h			Deterministic exact string-to-double parser
+core-math/mt_ryu.h			Ryu shortest-representation double-to-string formatter
 cv.h					Code value header
 deb.c					Debugging routines
 doio.c					I/O operations
@@ -84,6 +90,31 @@ miniperlmain.c				Basic perl w/o dynamic loading or extensions
 mkppport				A script that distributes ppport.h
 mkppport.lst				List of extensions that need a ppport.h
 mro_core.c				Method Resolution Order code
+MT_BENCH.md				perl5-mt benchmarks against stock perl 5.40.2
+mt_cap.c				perl5-mt: capabilities (the shared slot table, MT::Cap)
+mt_cap.h				perl5-mt: capability descriptors and marshalled values
+mt_chan.c				perl5-mt: channels, cells and shared hashes (process memory, futex waits)
+mt_ctx.h				perl5-mt: the fiber context switch contract
+mt_ctx_amd64.c				perl5-mt: fiber context switch (amd64)
+mt_ctx_arm64.c				perl5-mt: fiber context switch (arm64)
+mt_ctx_ppc64_aix.c			PowerPC64 AIX/PASE coroutine context switch
+mt_ctx_ppc64le.c			perl5-mt: fiber context switch (ppc64le, ELFv2)
+mt_ctx_s390x.c				s390x z/OS coroutine context switch
+MT_DESIGN.md				perl5-mt architecture and design guide
+mt_err.h				perl5-mt: MT_* error codes
+mt_fault.c				Fault containment, watchdog, and signal isolation
+mt_fault.h				Header for fault containment runtime
+mt_fiber.c				perl5-mt: fibers: records, stacklets, the vmstate swap, MT::Fiber
+mt_fiber.h				perl5-mt: fiber records and the interpreter state a fiber swaps
+mt_freeze.c				perl5-mt: the freeze arena and perl_freeze_boot_image()
+mt_image.h				perl5-mt: the sealed boot image and its per-worker tables
+mt_partition.c				Partitioning, resource classes, and process pairs runtime
+mt_partition.h				Header for partitioning runtime
+MT_README.md				perl5-mt fork overview, build matrix and phases
+mt_worker.c				perl5-mt: worker interpreters and per-worker CV tables
+mt_xs.h					perl5-mt: the two-tier XS dispatcher (frames, shared segment, stubs)
+mt_xs_bridge.c				perl5-mt: host side of the XS dispatcher (stub calls, marshalling)
+mt_xs_compartment.c			perl5-mt: XS compartments (pool, rings, service loop)
 myconfig.SH				Prints summary of the current configuration
 mydtrace.h				Support for optional DTrace probes
 nostdio.h				Cause compile error on stdio calls
@@ -112,6 +143,7 @@ perldtrace.d				D script for Perl probes
 perlio.c				C code for PerlIO abstraction
 perlio.h				PerlIO abstraction
 perlio.sym				Symbols for PerlIO abstraction
+perlio_async.c				perl5-mt: the :async PerlIO layer over krt aio; MT::IO
 perliol.h				PerlIO Layer definition
 perlsdio.h				Fake stdio using perlio
 perlstatic.h				Like inline.h, but functions not declared inline
@@ -212,6 +244,25 @@ warnings.h				The warning numbers
 write_buildcustomize.pl			Generate lib/buildcustomize.pl
 XSUB.h					Include file for extension subroutines
 zaphod32_hash.h				Zaphod32 hash code (32 bit fast hash function)
+accel/accel_amd_npu.c			AMD XDNA NPU acceleration backend
+accel/accel_ane.c			Apple Neural Engine acceleration backend
+accel/accel_darwin_accelerate.c		macOS Accelerate framework backend
+accel/accel_intel_npu.c			Intel NPU acceleration backend
+accel/accel_internal.h			Internal declarations for native acceleration backends
+accel/accel_mesa_opencl.c		Mesa OpenCL acceleration backend
+accel/accel_metal.c			Apple Metal acceleration backend
+accel/accel_power_nx.c			IBM Power NX coprocessor backend
+accel/accel_s390x_nnpa.c		IBM z/Architecture NNPA backend
+accel/accel_scalar.c			Reference scalar acceleration backend
+accel/accel_test.h			TAP test helpers for accel/
+accel/Makefile				Native acceleration library build and test Makefile
+accel/perl_accel.c			Native acceleration dispatcher and backend registry
+accel/perl_accel.h			Public C API for native acceleration offload
+accel/t_accel_backends.c		Unit tests for accel backend selection and fallback
+accel/t_accel_core.c			Core unit tests for accel dispatcher and policy
+accel/t_accel_cr.c			Correctly-rounded numerical parity tests for accel
+accel/t_accel_opencl_filter.c		Unit tests for Mesa OpenCL vendor filtering
+accel/t_simd_probe.c			Unit tests for expanded SIMD ISA tier probing
 amigaos4/amigaio.c			AmigaOS4 port
 amigaos4/amigaio.h			AmigaOS4 port
 amigaos4/amigaos.c			AmigaOS4 port
@@ -4859,6 +4910,48 @@ ext/IPC-Open3/t/IPC-Open3.t		See if IPC::Open3 works
 ext/mro/Changes				mro extension
 ext/mro/mro.pm				mro extension
 ext/mro/mro.xs				mro extension
+ext/MT/lib/MT.pm			perl5-mt: ext/MT, the distribution's module
+ext/MT/lib/MT/Accel.pm			Perl interface to native acceleration backends
+ext/MT/lib/MT/Array.pm			perl5-mt: packed typed arrays and reductions
+ext/MT/lib/MT/Cell.pm			perl5-mt: cells
+ext/MT/lib/MT/Channel.pm		perl5-mt: channels
+ext/MT/lib/MT/Checkpoint.pm		Checkpoint and restart support for MT workers
+ext/MT/lib/MT/Class.pm			Resource class scheduling controls
+ext/MT/lib/MT/Fault.pm			Fault containment and heartbeat inspection
+ext/MT/lib/MT/Fiber.pm			perl5-mt: fibers (documented; core XSUBs)
+ext/MT/lib/MT/IO.pm			perl5-mt: IO helpers (documented; core XSUBs)
+ext/MT/lib/MT/Namespace.pm		Process namespace and isolation bindings
+ext/MT/lib/MT/Partition.pm		Logical partition management
+ext/MT/lib/MT/PDLBridge.pm		Zero-copy PDL bridge for MT::Array
+ext/MT/lib/MT/Pool.pm			perl5-mt: the worker pool
+ext/MT/lib/MT/ProcessPair.pm		Active/backup process pair failover
+ext/MT/lib/MT/SharedHash.pm		perl5-mt: shared hashes
+ext/MT/lib/MT/SharedImage.pm		Shared read-only image mapping
+ext/MT/lib/MT/Supervisor.pm		Supervision tree and restart policies
+ext/MT/Makefile.PL			perl5-mt: ext/MT extension
+ext/MT/MT.xs				perl5-mt: ext/MT, the presence check of the core
+ext/MT/mt_phase10.xs.inc		XS bindings for partitioning and process pairs
+ext/MT/mt_phase6.xs.inc			XS bindings for fault containment and supervision
+ext/MT/t/cell.t				perl5-mt: MT::Cell tests
+ext/MT/t/channel.t			perl5-mt: MT::Channel tests
+ext/MT/t/fiber.t			perl5-mt: MT::Fiber presence
+ext/MT/t/io.t				perl5-mt: MT::IO tests
+ext/MT/t/pool.t				perl5-mt: MT::Pool message and argument rules
+ext/MT/t/sharedhash.t			perl5-mt: MT::SharedHash tests
+ext/MT-Decimal/Decimal.xs		XS interface for MT::Decimal
+ext/MT-Decimal/lib/MT/Decimal.pm	IEEE 754 decimal128 arithmetic module
+ext/MT-Decimal/Makefile.PL		Makefile generator for MT::Decimal
+ext/MT-Decimal/mt_decimal.c		Decimal128 C implementation
+ext/MT-Decimal/mt_decimal.h		Decimal128 C header
+ext/MT-Decimal/t/basic.t		Tests for MT::Decimal
+ext/MT-XSTest/lib/MT/XSTest.pm		perl5-mt: a thread-safe XS module for the dispatcher tests
+ext/MT-XSTest/Makefile.PL		perl5-mt: MT::XSTest extension
+ext/MT-XSTest/t/basic.t			perl5-mt: MT::XSTest tests
+ext/MT-XSTest/XSTest.xs			perl5-mt: MT::XSTest XS code
+ext/MT-XSTest-Legacy/Legacy.xs			perl5-mt: MT::XSTest::Legacy XS code
+ext/MT-XSTest-Legacy/lib/MT/XSTest/Legacy.pm	perl5-mt: a legacy XS module for the dispatcher tests
+ext/MT-XSTest-Legacy/Makefile.PL		perl5-mt: MT::XSTest::Legacy extension
+ext/MT-XSTest-Legacy/t/basic.t			perl5-mt: MT::XSTest::Legacy tests
 ext/NDBM_File/hints/cygwin.pl		Hint for NDBM_File for named architecture
 ext/NDBM_File/hints/dec_osf.pl		Hint for NDBM_File for named architecture
 ext/NDBM_File/hints/dynixptx.pl		Hint for NDBM_File for named architecture
@@ -5309,6 +5402,33 @@ hints/unicosmk.sh			Hints for named architecture
 hints/unisysdynix.sh			Hints for named architecture
 hints/utekv.sh				Hints for named architecture
 hints/vos.sh				Hints for named architecture
+krt/krt.h				perl5-mt kernel runtime adapter: OS contract
+krt/krt_aix.c				Native AIX and IBM i PASE krt backend
+krt/krt_atomic.h			perl5-mt krt: C11 atomics and spin hints
+krt/krt_darwin.c			perl5-mt krt: Darwin backend (Mach VM, fork, ulock, kqueue)
+krt/krt_internal.h			perl5-mt krt: helpers shared by the backends
+krt/krt_linux.c				perl5-mt krt: Linux backend (memfd, clone, futex, rseq, io_uring)
+krt/krt_ring.h				perl5-mt krt: lock-free SPSC and MPSC rings
+krt/krt_stubs.c				perl5-mt krt: compile-clean stubs for AIX and z/OS USS
+krt/krt_test.h				perl5-mt krt: TAP helper for the C tests
+krt/krt_vec.h				perl5-mt krt: vector table and doorbell wait
+krt/krt_wait.h				perl5-mt krt: short-spin wait line (perl_krt_wait_line)
+krt/krt_wait_tier.h			perl5-mt krt: CPU wait tiers (umwait, pause, wfe, ppc nap), internal
+krt/krt_zos.c				Native z/OS USS krt backend
+krt/Makefile				perl5-mt krt: standalone build and unit tests
+krt/t_aio.c				perl5-mt krt test: async I/O
+krt/t_comp.c				perl5-mt krt test: compartments
+krt/t_futex.c				perl5-mt krt test: wait/wake
+krt/t_key.c				perl5-mt krt test: memory protection keys
+krt/t_notify.c				perl5-mt krt test: cross-thread notify
+krt/t_platform_abi.c			Platform ABI and backend probe tests for krt
+krt/t_ring_mpsc.c			perl5-mt krt test: MPSC ring
+krt/t_ring_spsc.c			perl5-mt krt test: SPSC ring
+krt/t_ring_xproc.c			perl5-mt krt: rings between processes (shared futex bridge)
+krt/t_shm.c				perl5-mt krt test: shared memory sealing
+krt/t_vec.c				perl5-mt krt test: vector table within one process
+krt/t_vec_xproc.c			perl5-mt krt test: vector table across processes, round trips
+krt/t_wait_line.c			perl5-mt krt test: wait_line wakeup latency and budget
 lib/_charnames.pm			Character names
 lib/AnyDBM_File.pm			Perl module to emulate dbmopen
 lib/AnyDBM_File.t			See if AnyDBM_File works
@@ -5634,6 +5754,12 @@ os2/os2thread.h				pthread-like typedefs
 os2/perl2cmd.pl				Corrects installed binaries under OS/2
 os2/perlrexx.c				Support perl interpreter embedded in REXX
 os2/perlrexx.cmd			Test perl interpreter embedded in REXX
+pkg/debian/changelog			Debian package changelog
+pkg/debian/compat			Debian debhelper compatibility level
+pkg/debian/control			Debian package control metadata
+pkg/debian/rules			Debian package build rules
+pkg/macos/build-pkg.sh			macOS installer package build script
+pkg/rpm/perl5-mt.spec			RPM spec file for perl5-mt
 plan9/9front.patch			Plan9 port: patch for 9front-specific flavor of Plan 9
 plan9/aperl				Plan9 port: shell to make Perl error messages Acme-friendly
 plan9/arpa/inet.h			Plan9 port: replacement C header file
@@ -5940,6 +6066,11 @@ regen/scope_types.pl			Regenerate scope_types.h
 regen/tidy_embed.pl			Program to clean up embed.fnc manually
 regen/unicode_constants.pl		generate unicode_constants.h
 regen/warnings.pl			Program to write warnings.h and lib/warnings.pm
+simd/perl_simd.c			perl5-mt: the SIMD level (Perl_simd_detect, PERL_SIMD_LEVEL)
+simd/perl_simd_bytes.h			perl5-mt: byte kernels, scalar twins and vector bodies
+simd/perl_simd_dispatch.h		perl5-mt: SIMD levels, the dispatch gates and PERL_SIMD_ON
+simd/perl_simd_regex.h			perl5-mt: regex span kernels and the class bitmap scan
+simd/perl_simd_utf8.h			perl5-mt: UTF-8 classification (WELL_FORMED, ALL_ASCII, UNSURE) and the character count
 t/base/cond.t				See if conditionals work
 t/base/if.t				See if if works
 t/base/lex.t				See if lexical items work
@@ -6229,6 +6360,32 @@ t/mro/vulcan_c3.t			mro tests
 t/mro/vulcan_c3_utf8.t			utf8 mro tests
 t/mro/vulcan_dfs.t			mro tests
 t/mro/vulcan_dfs_utf8.t			utf8 mro tests
+t/mt/accel.t				Tests for MT::Accel
+t/mt/accel_array.t			Tests for MT::Array acceleration offload
+t/mt/av_packed.t			perl5-mt: packed arrays and MT::Array reductions
+t/mt/build_flags.t			Tests for PGO and build optimization flags
+t/mt/caps.t				perl5-mt: capabilities across workers
+t/mt/ctx.t				perl5-mt: the fiber context switch and the MT::Ctx self-test
+t/mt/fault.t				Tests for fault containment, supervision, and checkpoints
+t/mt/fault_model.t			Tests for fault model and liveness heartbeats
+t/mt/fiber.t				perl5-mt: fibers: resume and yield, the state they swap, error paths, workers
+t/mt/followups.t			perl5-mt: worker MY_CXT, overloads, and closures regression tests
+t/mt/freeze.t				perl5-mt: the sealed boot image and worker interpreters
+t/mt/hv_swiss.t				perl5-mt: SwissTable hashes behind the chained array
+t/mt/immortal.t				perl5-mt: process-global immortals, SVf_IMMORTAL, guards
+t/mt/num_digest.t			Deterministic numerics and digest parity tests
+t/mt/partition.t			Tests for partitioning, namespaces, and process pairs
+t/mt/pdl_proof.t			Tests for PDL bridge zero-copy proof
+t/mt/perlio_async.t			perl5-mt: the :async PerlIO layer over the aio ring; MT::IO
+t/mt/phase6_followups.t			Regression tests for fault containment and worker pool edge cases
+t/mt/platform_abi.t			Tests for native platform ABI detection
+t/mt/pool.t				perl5-mt: the worker pool, channels, cells, shared hashes, shutdown
+t/mt/sched.t				perl5-mt: the fiber scheduler: run, park and wake, preemption, workers
+t/mt/simd_parity.t			perl5-mt: SIMD hooks against the scalar twins over a fixed corpus
+t/mt/vm_opt.t				Tests for VM and interpreter optimizations
+t/mt/xs_bridge.t			perl5-mt: the two-tier XS dispatcher with the fixture modules
+t/mt/xs_compartment.t			perl5-mt: CPAN XS modules served by XS compartments
+t/mt/xs_fiber.t				perl5-mt: fibers park on remote calls; the scheduler drains the replies
 t/op/64bitint.t				See if 64 bit integers work
 t/op/aassign.t				test list assign
 t/op/alarm.t				See if alarm works
@@ -6677,6 +6834,18 @@ t/win32/stat.t				Test Win32 stat emulation
 t/win32/symlink.t			Test Win32 symlink
 t/win32/system.t			See if system works in Win*
 t/win32/system_tests			Test runner for system.t
+tools/bench/ithreads.pl			perl5-mt: the stock ithreads driver
+tools/bench/mt.pl			perl5-mt: the perl5-mt pool driver
+tools/bench/prefork.pl			perl5-mt: the stock prefork driver
+tools/bench/run.sh			perl5-mt: median of the reps of one driver
+tools/bench/Workload.pm			perl5-mt: the benchmark workload (file, socketpair, JSON, hashing)
+tools/bench-suite.pl			perl5-mt: unified reproducible benchmark suite
+tools/ci-macos.sh			Run the perl5-mt CI steps on the arm64 macOS host over ssh
+tools/cpan-fixtures.sh			perl5-mt: install the CPAN fixture modules with the fork's cpan
+tools/mt-xs-latency.pl			perl5-mt: round-trip latency of a trivial remote XS call
+tools/pdl-proof.pl			Zero-copy PDL bridge proof-of-concept script
+tools/pgo-train.pl			Profile-guided optimization training workload
+tools/simd-bench.pl			perl5-mt: throughput of the SIMD hooks, scalar against the host level
 utils/corelist.PL			Module::CoreList
 utils/cpan.PL				easily interact with CPAN from the command line
 utils/enc2xs.PL				Encode module generator

@@ -251,8 +251,17 @@ S_new_slab(pTHX_ OPSLAB *head, size_t sz)
         abort();
     }
 #else
-    slab = (OPSLAB *)PerlMemShared_malloc(sz_bytes);
-    Zero(slab, sz_bytes, char);
+    /* perl5-mt: with PERL_MT_IMAGE=1 the op slabs of the program that
+     * becomes the boot image are carved out of the freeze arena */
+    if (UNLIKELY(PL_mt_ops_in_arena)
+        && (slab = (OPSLAB *)Perl_mt_arena_alloc(sz_bytes))) {
+        Zero(slab, sz_bytes, char);
+        slab->opslab_mt_arena = 1;
+    }
+    else {
+        slab = (OPSLAB *)PerlMemShared_malloc(sz_bytes);
+        Zero(slab, sz_bytes, char);
+    }
 #endif
     slab->opslab_size = (U16)sz;
 
@@ -426,7 +435,11 @@ Perl_Slab_Alloc(pTHX_ size_t sz)
 
 #undef INIT_OPSLOT
 
-#ifdef PERL_DEBUG_READONLY_OPS
+/* perl5-mt: Slab_to_ro marks a slab chain read-only.  For the boot image
+ * (slabs in the freeze arena, or any slab compiled before the freeze) the
+ * mark is what op_free and the refcount paths honour: such ops are never
+ * written to again, and the arena's own seal is what enforces it.  Under
+ * PERL_DEBUG_READONLY_OPS the pages are mprotected as before. */
 void
 Perl_Slab_to_ro(pTHX_ OPSLAB *slab)
 {
@@ -434,39 +447,42 @@ Perl_Slab_to_ro(pTHX_ OPSLAB *slab)
 
     if (slab->opslab_readonly) return;
     slab->opslab_readonly = 1;
+#ifdef PERL_DEBUG_READONLY_OPS
     for (; slab; slab = slab->opslab_next) {
-        /*DEBUG_U(PerlIO_printf(Perl_debug_log,"mprotect ->ro %lu at %p\n",
-                              (unsigned long) slab->opslab_size, (void *)slab));*/
         if (mprotect(slab, OpSLABSizeBytes(slab->opslab_size), PROT_READ))
             Perl_warn(aTHX_ "mprotect for %p %lu failed with %d", (void *)slab,
                              (unsigned long)slab->opslab_size, errno);
     }
+#else
+    PERL_UNUSED_CONTEXT;
+#endif
 }
 
 void
 Perl_Slab_to_rw(pTHX_ OPSLAB *const slab)
 {
+#ifdef PERL_DEBUG_READONLY_OPS
     OPSLAB *slab2;
+#endif
 
     PERL_ARGS_ASSERT_SLAB_TO_RW;
 
     if (!slab->opslab_readonly) return;
+    /* perl5-mt: the boot image is sealed; breakpoints in it are refused */
+    if (PL_mt_image)
+        Perl_croak_mt(aTHX_ MT_DEBUGGER_UNSUPPORTED);
+#ifdef PERL_DEBUG_READONLY_OPS
     slab2 = slab;
     for (; slab2; slab2 = slab2->opslab_next) {
-        /*DEBUG_U(PerlIO_printf(Perl_debug_log,"mprotect ->rw %lu at %p\n",
-                              (unsigned long) size, (void *)slab2));*/
         if (mprotect((void *)slab2, OpSLABSizeBytes(slab2->opslab_size),
                      PROT_READ|PROT_WRITE)) {
             Perl_warn(aTHX_ "mprotect RW for %p %lu failed with %d", (void *)slab,
                              (unsigned long)slab2->opslab_size, errno);
         }
     }
+#endif
     slab->opslab_readonly = 0;
 }
-
-#else
-#  define Slab_to_rw(op)    NOOP
-#endif
 
 /* make freed ops die if they're inadvertently executed */
 #ifdef DEBUGGING
@@ -540,6 +556,9 @@ Perl_opslab_free(pTHX_ OPSLAB *slab)
     PERL_ARGS_ASSERT_OPSLAB_FREE;
     PERL_UNUSED_CONTEXT;
     DEBUG_S_warn((aTHX_ "freeing slab %p", (void*)slab));
+    /* perl5-mt: a sealed slab (boot image) is never freed */
+    if (slab->opslab_readonly)
+        return;
     assert(slab->opslab_refcnt == 1);
     PerlMemShared_free(slab->opslab_freed);
     do {
@@ -555,7 +574,8 @@ Perl_opslab_free(pTHX_ OPSLAB *slab)
             abort();
         }
 #else
-        PerlMemShared_free(slab);
+        if (!slab->opslab_mt_arena)   /* perl5-mt: arena memory stays */
+            PerlMemShared_free(slab);
 #endif
         slab = slab2;
     } while (slab);
@@ -606,16 +626,22 @@ Perl_opslab_force_free(pTHX_ OPSLAB *slab)
     opslab_free(slab);
 }
 
-#ifdef PERL_DEBUG_READONLY_OPS
+/* perl5-mt: always compiled.  An op in a sealed slab (boot image) is
+ * never written: its count is reported as staying above zero so that it
+ * is never freed. */
 OP *
 Perl_op_refcnt_inc(pTHX_ OP *o)
 {
     if(o) {
         OPSLAB *const slab = o->op_slabbed ? OpSLAB(o) : NULL;
         if (slab && slab->opslab_readonly) {
-            Slab_to_rw(slab);
-            ++o->op_targ;
-            Slab_to_ro(slab);
+#ifdef PERL_DEBUG_READONLY_OPS
+            if (!PL_mt_image) {
+                Slab_to_rw(slab);
+                ++o->op_targ;
+                Slab_to_ro(slab);
+            }
+#endif
         } else {
             ++o->op_targ;
         }
@@ -633,15 +659,20 @@ Perl_op_refcnt_dec(pTHX_ OP *o)
     PERL_ARGS_ASSERT_OP_REFCNT_DEC;
 
     if (slab && slab->opslab_readonly) {
-        Slab_to_rw(slab);
-        result = --o->op_targ;
-        Slab_to_ro(slab);
+#ifdef PERL_DEBUG_READONLY_OPS
+        if (!PL_mt_image) {
+            Slab_to_rw(slab);
+            result = --o->op_targ;
+            Slab_to_ro(slab);
+            return result;
+        }
+#endif
+        result = 1;
     } else {
         result = --o->op_targ;
     }
     return result;
 }
-#endif
 /*
  * In the following definition, the ", (OP*)0" is just to make the compiler
  * think the expression is of the right type: croak actually does a Siglongjmp.
@@ -888,6 +919,10 @@ Perl_op_free(pTHX_ OP *o)
                             so have already seen this node */
 
     if (!o || o->op_type == OP_FREED)
+        return;
+
+    /* perl5-mt: ops of the sealed boot image are shared and never freed */
+    if (o->op_slabbed && OpSLAB(o)->opslab_readonly && PL_mt_image)
         return;
 
     if (o->op_private & OPpREFCOUNTED) {
@@ -2779,6 +2814,76 @@ Perl_check_hash_fields_and_hekify(pTHX_ UNOP *rop, SVOP *key_op, int real)
 }
 
 
+/* wire fused superinstruction PP functions after peephole and
+ * finalization.  op_type, op_next, op_flags and op_private are left intact
+ * so B::Deparse, B::Concise, perl_clone and op_free remain 100% compatible. */
+static void
+S_mt_superinst_pass(pTHX_ OP *o)
+{
+    OP *kid;
+
+    if (!o)
+        return;
+
+    if (o->op_next) {
+        OP * const next = o->op_next;
+        const U16 type = o->op_type;
+
+        if (o->op_ppaddr == PL_ppaddr[type]) {
+            if (next->op_type == OP_COND_EXPR
+                && next->op_ppaddr == PL_ppaddr[OP_COND_EXPR])
+            {
+                switch (type) {
+                case OP_EQ:
+                    o->op_ppaddr = Perl_pp_eq_cond;
+                    break;
+                case OP_NE:
+                    o->op_ppaddr = Perl_pp_ne_cond;
+                    break;
+                case OP_LT:
+                    o->op_ppaddr = Perl_pp_lt_cond;
+                    break;
+                case OP_GT:
+                    o->op_ppaddr = Perl_pp_gt_cond;
+                    break;
+                case OP_LE:
+                    o->op_ppaddr = Perl_pp_le_cond;
+                    break;
+                case OP_GE:
+                    o->op_ppaddr = Perl_pp_ge_cond;
+                    break;
+                case OP_DEFINED:
+                    o->op_ppaddr = Perl_pp_defined_cond;
+                    break;
+                default:
+                    break;
+                }
+            }
+            else if (type == OP_METHOD_NAMED
+                     && next->op_type == OP_ENTERSUB
+                     && next->op_ppaddr == PL_ppaddr[OP_ENTERSUB]
+                     && !(next->op_private & OPpENTERSUB_DB))
+            {
+                o->op_ppaddr = Perl_pp_method_named_entersub;
+            }
+            else if (type == OP_SHIFT
+                     && next->op_type == OP_PADSV_STORE
+                     && next->op_ppaddr == PL_ppaddr[OP_PADSV_STORE]
+                     && (next->op_flags & OPf_STACKED)
+                     && !(next->op_private & OPpASSIGN_BACKWARDS))
+            {
+                o->op_ppaddr = Perl_pp_shift_padsv_store;
+            }
+        }
+    }
+
+    if (o->op_flags & OPf_KIDS) {
+        for (kid = cUNOPo->op_first; kid; kid = OpSIBLING(kid))
+            S_mt_superinst_pass(aTHX_ kid);
+    }
+}
+
+
 /* do all the final processing on an optree (e.g. running the peephole
  * optimiser on it), then attach it to cv (if cv is non-null)
  */
@@ -2804,6 +2909,7 @@ S_process_optree(pTHX_ CV *cv, OP *optree, OP* start)
     CALL_PEEP(*startp);
     finalize_optree(optree);
     op_prune_chain_head(startp);
+    S_mt_superinst_pass(aTHX_ optree);
 
     if (cv) {
         /* now that optimizer has done its work, adjust pad values */
@@ -10808,8 +10914,9 @@ Perl_newATTRSUB_x(pTHX_ I32 floor, OP *o, OP *proto, OP *attrs,
             /* We are applying attributes to an existing sub, so we need it
                upgraded if it is a constant.  */
             if (SvROK(gv) && SvTYPE(SvRV(gv)) != SVt_PVCV)
-                gv_init_pvn(gv, PL_curstash, name, namlen,
-                            SVf_UTF8 * name_is_utf8);
+                gv = Perl_mt_gv_init_private(aTHX_ PL_curstash, (SV *)gv,
+                                             name, namlen,
+                                             SVf_UTF8 * name_is_utf8);
         }
         else {			/* Maybe prototype now, and had at maximum
                                    a prototype or const/sub ref before.  */
@@ -11704,6 +11811,14 @@ Perl_newXS_len_flags(pTHX_ const char *name, STRLEN len,
 #else
         PoisonPADLIST(cv);
 #endif
+        /* perl5-mt: an XSUB defined while a PERL_XS_THREADSAFE module boots
+         * belongs to the in-process tier; inside an XS compartment every
+         * named XSUB defined while a frame is served is reported to the
+         * host, which installs a stub for it */
+        if (PL_mt_boot_safe)
+            CvFLAGS(cv) |= CVf_MT_THREADSAFE;
+        if (UNLIKELY(PL_mt_xs_newxs_log != NULL) && name)
+            Perl_mt_xs_log_newxs(aTHX_ cv);
 
         if (name)
             evanescent = process_special_blocks(0, name, gv, cv);
@@ -13541,7 +13656,10 @@ Perl_ck_refassign(pTHX_ OP *o)
                    it gets a GV */
                 CV *const cv = (CV*)SvRV(sv);
                 SV *name_sv = newSVhek_mortal(CvNAME_HEK(cv));
-                (void)gv_init_sv((GV*)sv, CvSTASH(cv), name_sv, 0);
+                STRLEN nlen;
+                const char *npv = SvPV(name_sv, nlen);
+                sv = (SV *)Perl_mt_gv_init_private(aTHX_ CvSTASH(cv), sv, npv,
+                                                   nlen, SvUTF8(name_sv) ? SVf_UTF8 : 0);
                 assert(SvTYPE(sv) == SVt_PVGV);
             }
             goto detach_and_stack;

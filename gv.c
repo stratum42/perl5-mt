@@ -251,6 +251,10 @@ Perl_cvgv_set(pTHX_ CV* cv, GV* gv)
     HEK *hek;
     PERL_ARGS_ASSERT_CVGV_SET;
 
+    /* perl5-mt: a CV of the boot image is never written to */
+    if (UNLIKELY(SvFLAGS(cv) & SVf_IMMORTAL))
+        return;
+
     if (oldgv == gv)
         return;
 
@@ -298,10 +302,23 @@ Perl_cvgv_from_hek(pTHX_ CV *cv)
     ASSUME(CvNAME_HEK(cv));
     svp = hv_fetchhek(CvSTASH(cv), CvNAME_HEK(cv), 0);
     gv = MUTABLE_GV(svp && *svp ? *svp : newSV_type(SVt_NULL));
+    /* perl5-mt: during a worker's global destruction nothing new is made
+     * for a CV of the boot image */
+    if (!isGV(gv) && (SvFLAGS(cv) & SVf_IMMORTAL)
+        && PL_phase == PERL_PHASE_DESTRUCT) {
+        if (!svp || !*svp)
+            SvREFCNT_dec((SV *)gv);
+        return NULL;
+    }
     if (!isGV(gv))
-        gv_init_pvn(gv, CvSTASH(cv), HEK_KEY(CvNAME_HEK(cv)),
+        gv = Perl_mt_gv_init_private(aTHX_ CvSTASH(cv), (SV *)gv,
+                HEK_KEY(CvNAME_HEK(cv)),
                 HEK_LEN(CvNAME_HEK(cv)),
                 SVf_UTF8 * cBOOL(HEK_UTF8(CvNAME_HEK(cv))));
+    /* perl5-mt: a CV of the boot image keeps its name hek and resolves
+     * its glob every time; nothing is cached in it */
+    if (SvFLAGS(cv) & SVf_IMMORTAL)
+        return gv;
     if (!CvNAMED(cv)) { /* gv_init took care of it */
         assert (SvANY(cv)->xcv_gv_u.xcv_gv == gv);
         return gv;
@@ -321,6 +338,9 @@ Perl_cvstash_set(pTHX_ CV *cv, HV *st)
 {
     HV *oldst = CvSTASH(cv);
     PERL_ARGS_ASSERT_CVSTASH_SET;
+    /* perl5-mt: a CV of the boot image is never written to */
+    if (UNLIKELY(SvFLAGS(cv) & SVf_IMMORTAL))
+        return;
     if (oldst == st)
         return;
     if (oldst)
@@ -862,7 +882,8 @@ S_gv_fetchmeth_internal(pTHX_ HV* stash, SV* meth, const char* name, STRLEN len,
         {
             if (!name)
                 name = SvPV_nomg(meth, len);
-            gv_init_pvn(topgv, stash, name, len, GV_ADDMULTI|is_utf8);
+            topgv = Perl_mt_gv_init_private(aTHX_ stash, (SV *)topgv, name,
+                                            len, GV_ADDMULTI|is_utf8);
         }
         if ((cand_cv = GvCV(topgv))) {
             /* If genuine method or valid cache entry, use it */
@@ -944,7 +965,8 @@ S_gv_fetchmeth_internal(pTHX_ HV* stash, SV* meth, const char* name, STRLEN len,
        have_candidate:
         assert(candidate);
         if (SvTYPE(candidate) != SVt_PVGV)
-            gv_init_pvn(candidate, cstash, name, len, GV_ADDMULTI|is_utf8);
+            candidate = Perl_mt_gv_init_private(aTHX_ cstash, (SV *)candidate,
+                                                name, len, GV_ADDMULTI|is_utf8);
         if (SvTYPE(candidate) == SVt_PVGV && (cand_cv = GvCV(candidate)) && !GvCVGEN(candidate)) {
             /*
              * Found real method, cache method in topgv if:
@@ -1380,7 +1402,10 @@ Perl_gv_autoload_pvn(pTHX_ HV *stash, const char *name, STRLEN len, U32 flags)
                          SVfARG(packname),
                          UTF8fARG(is_utf8, len, name));
 
-    if (CvISXSUB(cv)) {
+    /* perl5-mt: an XSUB in the sealed boot image cannot carry the name in
+     * its own PV (SVf_IMMORTAL); such an AUTOLOAD reads $AUTOLOAD, which
+     * is set below for every kind of sub */
+    if (CvISXSUB(cv) && !(SvFLAGS(cv) & SVf_IMMORTAL)) {
         /* Instead of forcing the XSUB to do another lookup for $AUTOLOAD
          * and split that value on the last '::', pass along the same data
          * via the SvPVX field in the CV, and the stash in CvSTASH.
@@ -1835,7 +1860,8 @@ S_parse_gv_stash_name(pTHX_ HV **stash, GV **gv, const char **name,
                 }
                 /* here we know that *gv && *gv != &PL_sv_undef */
                 if (SvTYPE(*gv) != SVt_PVGV)
-                    gv_init_pvn(*gv, *stash, key, *len, (add & GV_ADDMULTI)|is_utf8);
+                    *gv = Perl_mt_gv_init_private(aTHX_ *stash, (SV *)*gv, key,
+                                                  *len, (add & GV_ADDMULTI)|is_utf8);
                 else
                     GvMULTI_on(*gv);
 
@@ -1866,8 +1892,8 @@ S_parse_gv_stash_name(pTHX_ HV **stash, GV **gv, const char **name,
                 if (!*gv) {
                     *gv = MUTABLE_GV(*hv_fetchs(PL_defstash, "main::", TRUE));
                     if (SvTYPE(*gv) != SVt_PVGV) {
-                        gv_init_pvn(*gv, PL_defstash, "main::", 6,
-                                    GV_ADDMULTI);
+                        *gv = Perl_mt_gv_init_private(aTHX_ PL_defstash,
+                                    (SV *)*gv, "main::", 6, GV_ADDMULTI);
                         GvHV(*gv) =
                             MUTABLE_HV(SvREFCNT_inc_simple(PL_defstash));
                     }
@@ -2682,7 +2708,8 @@ Perl_gv_fetchpvn_flags(pTHX_ const char *nambeg, STRLEN full_len, I32 flags,
         Perl_ck_warner_d(aTHX_ packWARN(WARN_INTERNAL),
                 "Had to create %" UTF8f " unexpectedly",
                  UTF8fARG(is_utf8, name_end-nambeg, nambeg));
-    gv_init_pvn(gv, stash, name, len, (add & GV_ADDMULTI)|is_utf8);
+    gv = Perl_mt_gv_init_private(aTHX_ stash, (SV *)gv, name, len,
+                                 (add & GV_ADDMULTI)|is_utf8);
 
     if (   full_len != 0
            && isIDFIRST_lazy_if_safe(name, name + full_len, is_utf8)) {
@@ -3143,10 +3170,37 @@ is true).
 =cut
 */
 
+/* perl5-mt: the overload table of a stash shared with the boot image
+ * (SVf_IMMORTAL) cannot hang off the stash itself; a worker keeps its own
+ * (mt_worker.c) and reads the image's while that is still current */
+#define S_amt_find(stash) \
+    (UNLIKELY(SvFLAGS(stash) & SVf_IMMORTAL)				\
+        ? Perl_mt_stash_amt(aTHX_ (stash))				\
+        : mg_find((const SV *)(stash), PERL_MAGIC_overload_table))
+
+static void
+S_amt_set(pTHX_ HV *stash, const void *amt, STRLEN len)
+{
+    if (UNLIKELY(SvFLAGS(stash) & SVf_IMMORTAL))
+        Perl_mt_stash_amt_set(aTHX_ stash, amt, len);
+    else
+        sv_magic(MUTABLE_SV(stash), 0, PERL_MAGIC_overload_table,
+                 (const char *)amt, (I32)len);
+}
+
+static void
+S_amt_remove(pTHX_ HV *stash)
+{
+    if (UNLIKELY(SvFLAGS(stash) & SVf_IMMORTAL))
+        Perl_mt_stash_amt_remove(aTHX_ stash);
+    else
+        sv_unmagic(MUTABLE_SV(stash), PERL_MAGIC_overload_table);
+}
+
 int
 Perl_Gv_AMupdate(pTHX_ HV *stash, bool destructing)
 {
-  MAGIC* const mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table);
+  MAGIC* const mg = S_amt_find(stash);
   AMT amt;
   const struct mro_meta* stash_meta = HvMROMETA(stash);
   U32 newgen;
@@ -3159,7 +3213,7 @@ Perl_Gv_AMupdate(pTHX_ HV *stash, bool destructing)
       if (amtp->was_ok_sub == newgen) {
           return AMT_AMAGIC(amtp) ? 1 : 0;
       }
-      sv_unmagic(MUTABLE_SV(stash), PERL_MAGIC_overload_table);
+      S_amt_remove(aTHX_ stash);
   }
 
   DEBUG_o( Perl_deb(aTHX_ "Recalculating overload magic in package %s\n",HvNAME_get(stash)) );
@@ -3297,16 +3351,14 @@ Perl_Gv_AMupdate(pTHX_ HV *stash, bool destructing)
 
     if (filled) {
       AMT_AMAGIC_on(&amt);
-      sv_magic(MUTABLE_SV(stash), 0, PERL_MAGIC_overload_table,
-                                                (char*)&amt, sizeof(AMT));
+      S_amt_set(aTHX_ stash, &amt, sizeof(AMT));
       return TRUE;
     }
   }
   /* Here we have no table: */
  no_table:
   AMT_AMAGIC_off(&amt);
-  sv_magic(MUTABLE_SV(stash), 0, PERL_MAGIC_overload_table,
-                                                (char*)&amt, sizeof(AMTS));
+  S_amt_set(aTHX_ stash, &amt, sizeof(AMTS));
   return 0;
 }
 
@@ -3332,12 +3384,12 @@ Perl_gv_handler(pTHX_ HV *stash, I32 id)
     stash_meta = HvMROMETA(stash);
     newgen = PL_sub_generation + stash_meta->pkg_gen + stash_meta->cache_gen;
 
-    mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table);
+    mg = S_amt_find(stash);
     if (!mg) {
       do_update:
         if (Gv_AMupdate(stash, 0) == -1)
             return NULL;
-        mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table);
+        mg = S_amt_find(stash);
     }
     assert(mg);
     amtp = (AMT*)mg->mg_ptr;
@@ -3466,7 +3518,7 @@ Perl_amagic_applies(pTHX_ SV *sv, int method, int flags)
     if (!Gv_AMG(stash))
         return FALSE;
 
-    MAGIC *mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table);
+    MAGIC *mg = S_amt_find(stash);
     if (!mg)
         return FALSE;
 
@@ -3788,7 +3840,7 @@ Perl_amagic_call(pTHX_ SV *left, SV *right, int method, int flags)
 
   if (!(AMGf_noleft & flags) && SvAMAGIC(left)
       && (stash = SvSTASH(SvRV(left))) && Gv_AMG(stash)
-      && (mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table))
+      && (mg = S_amt_find(stash))
       && (ocvp = cvp = (AMT_AMAGIC((AMT*)mg->mg_ptr)
                         ? (oamtp = amtp = (AMT*)mg->mg_ptr)->table
                         : NULL))
@@ -3915,7 +3967,7 @@ Perl_amagic_call(pTHX_ SV *left, SV *right, int method, int flags)
          if (!cv) goto not_found;
     } else if (!(AMGf_noright & flags) && SvAMAGIC(right)
                && (stash = SvSTASH(SvRV(right))) && Gv_AMG(stash)
-               && (mg = mg_find((const SV *)stash, PERL_MAGIC_overload_table))
+               && (mg = S_amt_find(stash))
                && (cvp = (AMT_AMAGIC((AMT*)mg->mg_ptr)
                           ? (amtp = (AMT*)mg->mg_ptr)->table
                           : NULL))
@@ -4365,6 +4417,7 @@ Perl_gv_try_downgrade(pTHX_ GV *gv)
         HEK *gvnhek = GvNAME_HEK(gv);
         (void)hv_deletehek(stash, gvnhek, G_DISCARD);
     } else if (GvMULTI(gv) && cv && SvREFCNT(cv) == 1 &&
+            !(SvFLAGS(gv) & SVf_IMMORTAL) &&   /* perl5-mt: sealed head */
             !SvOBJECT(cv) && !SvMAGICAL(cv) && !SvREADONLY(cv) &&
             CvSTASH(cv) == stash && !CvNAMED(cv) && CvGV(cv) == gv &&
             CvCONST(cv) && !CvNOWARN_AMBIGUOUS(cv) && !CvLVALUE(cv) && !CvUNIQUE(cv) &&

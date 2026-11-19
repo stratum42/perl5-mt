@@ -711,7 +711,10 @@ XS(XS_Internals_SvREADONLY)	/* This is dangerous stuff. */
         }
         else {
             /* I hope you really know what you are doing. */
-            SvFLAGS(sv) &=~ SVf_READONLY;
+            /* perl5-mt: an immortal stays protected; lib/universal.t
+             * relies on this being a silent no-op for \!0 */
+            if (!(SvFLAGS(sv) & SVf_IMMORTAL))
+                SvFLAGS(sv) &=~ SVf_READONLY;
             XSRETURN_NO;
         }
     }
@@ -757,6 +760,10 @@ XS(XS_Internals_SvREFCNT)	/* This is dangerous stuff. */
         croak_xs_usage(cv, "SCALAR[, REFCOUNT]");
 
     sv = SvRV(svz);
+
+    /* perl5-mt: an immortal's refcount is never written */
+    if (items == 2 && (SvFLAGS(sv) & SVf_IMMORTAL))
+        Perl_croak_mt(aTHX_ MT_IMMORTAL_MUTATION);
 
          /* I hope you really know what you are doing. */
     /* idea is for SvREFCNT(sv) to be accessed only once */

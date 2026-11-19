@@ -1,0 +1,312 @@
+/*    krt_internal.h
+ *
+ *    Helpers shared by the krt OS backends.  Not installed, not part of
+ *    the contract.
+ *
+ *    This file is part of perl5-mt and is distributed under the same terms
+ *    as Perl itself (Artistic License or GNU GPL).
+ */
+
+#ifndef PERL_KRT_INTERNAL_H
+#define PERL_KRT_INTERNAL_H
+
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/stat.h>
+#include "krt.h"
+#include "krt_atomic.h"
+#include "krt_ring.h"
+
+#define KRT_NEG_ERRNO()  (-(errno ? errno : EIO))
+
+static inline uint64_t
+krt_ts_to_ns(const struct timespec *ts)
+{
+    return (uint64_t)ts->tv_sec * 1000000000ull + (uint64_t)ts->tv_nsec;
+}
+
+static inline void
+krt_ns_to_ts(uint64_t ns, struct timespec *ts)
+{
+    ts->tv_sec  = (time_t)(ns / 1000000000ull);
+    ts->tv_nsec = (long)(ns % 1000000000ull);
+}
+
+/* In-flight request records: the backend owns the kernel-side user_data
+ * (the record index) so it can carry side state per request.           */
+
+typedef struct krt_req {
+    uint64_t  user_data;     /* caller's cookie                            */
+    uint8_t   op;
+    uint8_t   state;         /* backend private                            */
+    uint16_t  pad;
+    int32_t   res;           /* backend private (deferred result)          */
+    void     *dst;           /* e.g. perl_krt_stat_t * for STATX           */
+    void     *side;          /* backend private side buffer                */
+    uint32_t  next_free;     /* free list link                             */
+} krt_req_t;
+
+typedef struct krt_reqtab {
+    krt_req_t *reqs;
+    uint32_t   n;
+    uint32_t   free_head;    /* UINT32_MAX = none                          */
+    uint32_t   in_flight;
+} krt_reqtab_t;
+
+static inline int
+krt_reqtab_init(krt_reqtab_t *t, uint32_t n)
+{
+    uint32_t i;
+    t->reqs = (krt_req_t *)calloc(n, sizeof(krt_req_t));
+    if (!t->reqs)
+        return -ENOMEM;
+    t->n = n;
+    for (i = 0; i < n; i++)
+        t->reqs[i].next_free = (i + 1 < n) ? i + 1 : UINT32_MAX;
+    t->free_head = 0;
+    t->in_flight = 0;
+    return 0;
+}
+
+static inline void
+krt_reqtab_free(krt_reqtab_t *t)
+{
+    free(t->reqs);
+    t->reqs = NULL;
+    t->n = 0;
+}
+
+static inline krt_req_t *
+krt_req_alloc(krt_reqtab_t *t, uint32_t *idx_out)
+{
+    uint32_t i = t->free_head;
+    if (i == UINT32_MAX)
+        return NULL;
+    t->free_head = t->reqs[i].next_free;
+    t->in_flight++;
+    *idx_out = i;
+    memset(&t->reqs[i], 0, sizeof(krt_req_t));
+    return &t->reqs[i];
+}
+
+static inline void
+krt_req_release(krt_reqtab_t *t, uint32_t i)
+{
+    t->reqs[i].next_free = t->free_head;
+    t->free_head = i;
+    t->in_flight--;
+}
+
+/* Notification queue shared by all backends: an MPSC ring of cookies that
+ * perl_krt_aio_notify pushes and perl_krt_aio_drain merges into the
+ * output as PERL_KRT_CQE_NOTIFY completions.                              */
+#define KRT_NOTIFY_RING_CAP  1024u
+
+static inline int
+krt_notify_pop(perl_krt_mpsc_t *ring, perl_krt_cqe_t *cqes, uint32_t max)
+{
+    uint32_t n = 0;
+    while (n < max) {
+        uint64_t ud;
+        if (perl_krt_mpsc_pop(ring, &ud, sizeof ud))
+            break;
+        cqes[n].user_data = ud;
+        cqes[n].res = 0;
+        cqes[n].flags = PERL_KRT_CQE_NOTIFY;
+        n++;
+    }
+    return (int)n;
+}
+
+static inline void
+krt_stat_from_posix(perl_krt_stat_t *d, const struct stat *s)
+{
+    d->dev = (uint64_t)s->st_dev;   d->ino = (uint64_t)s->st_ino;
+    d->nlink = (uint64_t)s->st_nlink; d->mode = (uint64_t)s->st_mode;
+    d->uid = (uint64_t)s->st_uid;   d->gid = (uint64_t)s->st_gid;
+    d->rdev = (uint64_t)s->st_rdev; d->size = (uint64_t)s->st_size;
+    d->blksize = (uint64_t)s->st_blksize; d->blocks = (uint64_t)s->st_blocks;
+#if defined(__APPLE__)
+    d->atime_ns = (int64_t)krt_ts_to_ns(&s->st_atimespec);
+    d->mtime_ns = (int64_t)krt_ts_to_ns(&s->st_mtimespec);
+    d->ctime_ns = (int64_t)krt_ts_to_ns(&s->st_ctimespec);
+    d->btime_ns = (int64_t)krt_ts_to_ns(&s->st_birthtimespec);
+#elif defined(_AIX)
+    d->atime_ns = (int64_t)s->st_atime * 1000000000ll + (int64_t)s->st_atime_n;
+    d->mtime_ns = (int64_t)s->st_mtime * 1000000000ll + (int64_t)s->st_mtime_n;
+    d->ctime_ns = (int64_t)s->st_ctime * 1000000000ll + (int64_t)s->st_ctime_n;
+    d->btime_ns = 0;
+#elif defined(__MVS__)
+    d->atime_ns = (int64_t)s->st_atime * 1000000000ll;
+    d->mtime_ns = (int64_t)s->st_mtime * 1000000000ll;
+    d->ctime_ns = (int64_t)s->st_ctime * 1000000000ll;
+    d->btime_ns = 0;
+#else
+    d->atime_ns = (int64_t)krt_ts_to_ns(&s->st_atim);
+    d->mtime_ns = (int64_t)krt_ts_to_ns(&s->st_mtim);
+    d->ctime_ns = (int64_t)krt_ts_to_ns(&s->st_ctim);
+    d->btime_ns = 0;
+#endif
+}
+
+/* ---- portable byte-order helpers ---------------------------------------- */
+
+static inline uint16_t
+krt_bswap16(uint16_t v)
+{
+    return (uint16_t)((v >> 8) | (v << 8));
+}
+
+static inline uint32_t
+krt_bswap32(uint32_t v)
+{
+    return ((v & 0x000000ffu) << 24) |
+           ((v & 0x0000ff00u) <<  8) |
+           ((v & 0x00ff0000u) >>  8) |
+           ((v & 0xff000000u) >> 24);
+}
+
+static inline uint64_t
+krt_bswap64(uint64_t v)
+{
+    return ((v & 0x00000000000000ffull) << 56) |
+           ((v & 0x000000000000ff00ull) << 40) |
+           ((v & 0x0000000000ff0000ull) << 24) |
+           ((v & 0x00000000ff000000ull) <<  8) |
+           ((v & 0x000000ff00000000ull) >>  8) |
+           ((v & 0x0000ff0000000000ull) >> 24) |
+           ((v & 0x00ff000000000000ull) >> 40) |
+           ((v & 0xff00000000000000ull) >> 56);
+}
+
+static inline uint32_t krt_htole32(uint32_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? krt_bswap32(v) : v;
+}
+
+static inline uint32_t krt_le32toh(uint32_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? krt_bswap32(v) : v;
+}
+
+static inline uint64_t krt_htole64(uint64_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? krt_bswap64(v) : v;
+}
+
+static inline uint64_t krt_le64toh(uint64_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? krt_bswap64(v) : v;
+}
+
+static inline uint32_t krt_htobe32(uint32_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? v : krt_bswap32(v);
+}
+
+static inline uint32_t krt_be32toh(uint32_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? v : krt_bswap32(v);
+}
+
+static inline uint64_t krt_htobe64(uint64_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? v : krt_bswap64(v);
+}
+
+static inline uint64_t krt_be64toh(uint64_t v)
+{
+    return PERL_KRT_BIG_ENDIAN ? v : krt_bswap64(v);
+}
+
+/* ---- portable ISO-8859-1 (ASCII) <-> IBM-1047 (EBCDIC) helpers ---------- */
+
+static inline uint8_t
+krt_ascii_to_ebcdic_1047(uint8_t c)
+{
+    static const uint8_t a2e[256] = {
+        0x00, 0x01, 0x02, 0x03, 0x37, 0x2d, 0x2e, 0x2f,
+        0x16, 0x05, 0x15, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x3c, 0x3d, 0x32, 0x26,
+        0x18, 0x19, 0x3f, 0x27, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x40, 0x5a, 0x7f, 0x7b, 0x5b, 0x6c, 0x50, 0x7d,
+        0x4d, 0x5d, 0x5c, 0x4e, 0x6b, 0x60, 0x4b, 0x61,
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+        0xf8, 0xf9, 0x7a, 0x5e, 0x4c, 0x7e, 0x6e, 0x6f,
+        0x7c, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+        0xc8, 0xc9, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6,
+        0xd7, 0xd8, 0xd9, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6,
+        0xe7, 0xe8, 0xe9, 0xad, 0xe0, 0xbd, 0x5f, 0x6d,
+        0x79, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+        0x88, 0x89, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96,
+        0x97, 0x98, 0x99, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+        0xa7, 0xa8, 0xa9, 0xc0, 0x4f, 0xd0, 0xa1, 0x07,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x06, 0x17,
+        0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x09, 0x0a, 0x1b,
+        0x30, 0x31, 0x1a, 0x33, 0x34, 0x35, 0x36, 0x08,
+        0x38, 0x39, 0x3a, 0x3b, 0x04, 0x14, 0x3e, 0xff,
+        0x41, 0xaa, 0x4a, 0xb1, 0x9f, 0xb2, 0x6a, 0xb5,
+        0xbb, 0xb4, 0x9a, 0x8a, 0xb0, 0xca, 0xaf, 0xbc,
+        0x90, 0x8f, 0xea, 0xfa, 0xbe, 0xa0, 0xb6, 0xb3,
+        0x9d, 0xda, 0x9b, 0x8b, 0xb7, 0xb8, 0xb9, 0xab,
+        0x64, 0x65, 0x62, 0x66, 0x63, 0x67, 0x9e, 0x68,
+        0x74, 0x71, 0x72, 0x73, 0x78, 0x75, 0x76, 0x77,
+        0xac, 0x69, 0xed, 0xee, 0xeb, 0xef, 0xec, 0xbf,
+        0x80, 0xfd, 0xfe, 0xfb, 0xfc, 0xba, 0xae, 0x59,
+        0x44, 0x45, 0x42, 0x46, 0x43, 0x47, 0x9c, 0x48,
+        0x54, 0x51, 0x52, 0x53, 0x58, 0x55, 0x56, 0x57,
+        0x8c, 0x49, 0xcd, 0xce, 0xcb, 0xcf, 0xcc, 0xe1,
+        0x70, 0xdd, 0xde, 0xdb, 0xdc, 0x8d, 0x8e, 0xdf
+    };
+    return a2e[c];
+}
+
+static inline uint8_t
+krt_ebcdic_1047_to_ascii(uint8_t c)
+{
+    static const uint8_t e2a[256] = {
+        0x00, 0x01, 0x02, 0x03, 0x9c, 0x09, 0x86, 0x7f,
+        0x97, 0x8d, 0x8e, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x9d, 0x0a, 0x08, 0x87,
+        0x18, 0x19, 0x92, 0x8f, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x17, 0x1b,
+        0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x05, 0x06, 0x07,
+        0x90, 0x91, 0x16, 0x93, 0x94, 0x95, 0x96, 0x04,
+        0x98, 0x99, 0x9a, 0x9b, 0x14, 0x15, 0x9e, 0x1a,
+        0x20, 0xa0, 0xe2, 0xe4, 0xe0, 0xe1, 0xe3, 0xe5,
+        0xe7, 0xf1, 0xa2, 0x2e, 0x3c, 0x28, 0x2b, 0x7c,
+        0x26, 0xe9, 0xea, 0xeb, 0xe8, 0xed, 0xee, 0xef,
+        0xec, 0xdf, 0x21, 0x24, 0x2a, 0x29, 0x3b, 0x5e,
+        0x2d, 0x2f, 0xc2, 0xc4, 0xc0, 0xc1, 0xc3, 0xc5,
+        0xc7, 0xd1, 0xa6, 0x2c, 0x25, 0x5f, 0x3e, 0x3f,
+        0xf8, 0xc9, 0xca, 0xcb, 0xc8, 0xcd, 0xce, 0xcf,
+        0xcc, 0x60, 0x3a, 0x23, 0x40, 0x27, 0x3d, 0x22,
+        0xd8, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+        0x68, 0x69, 0xab, 0xbb, 0xf0, 0xfd, 0xfe, 0xb1,
+        0xb0, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70,
+        0x71, 0x72, 0xaa, 0xba, 0xe6, 0xb8, 0xc6, 0xa4,
+        0xb5, 0x7e, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+        0x79, 0x7a, 0xa1, 0xbf, 0xd0, 0x5b, 0xde, 0xae,
+        0xac, 0xa3, 0xa5, 0xb7, 0xa9, 0xa7, 0xb6, 0xbc,
+        0xbd, 0xbe, 0xdd, 0xa8, 0xaf, 0x5d, 0xb4, 0xd7,
+        0x7b, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        0x48, 0x49, 0xad, 0xf4, 0xf6, 0xf2, 0xf3, 0xf5,
+        0x7d, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+        0x51, 0x52, 0xb9, 0xfb, 0xfc, 0xf9, 0xfa, 0xff,
+        0x5c, 0xf7, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+        0x59, 0x5a, 0xb2, 0xd4, 0xd6, 0xd2, 0xd3, 0xd5,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x39, 0xb3, 0xdb, 0xdc, 0xd9, 0xda, 0x9f
+    };
+    return e2a[c];
+}
+
+static inline int
+krt_native_is_ebcdic(void)
+{
+    return ((unsigned char)'A' == 0xC1u) ? 1 : 0;
+}
+
+#endif /* PERL_KRT_INTERNAL_H */

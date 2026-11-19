@@ -1535,6 +1535,7 @@ will be lost.
  L  PERL_MAGIC_dbfile         (none)         Debugger %_<filename
  l  PERL_MAGIC_dbline         vtbl_dbline    Debugger %_<filename
                                              element
+ M  PERL_MAGIC_mt_cap         vtbl_mt_cap    perl5-mt capability handle
  N  PERL_MAGIC_shared         (none)         Shared between threads
  n  PERL_MAGIC_shared_scalar  (none)         Shared between threads
  o  PERL_MAGIC_collxfrm       vtbl_collxfrm  Locale transformation
@@ -1595,6 +1596,7 @@ will be lost.
 =for apidoc_item ||PERL_MAGIC_isa
 =for apidoc_item ||PERL_MAGIC_isaelem
 =for apidoc_item ||PERL_MAGIC_lvref
+=for apidoc_item ||PERL_MAGIC_mt_cap
 =for apidoc_item ||PERL_MAGIC_nkeys
 =for apidoc_item ||PERL_MAGIC_nonelem
 =for apidoc_item ||PERL_MAGIC_overload_table
@@ -3067,6 +3069,41 @@ actually different "processes", would be done here.
 The Perl engine/interpreter and the host are orthogonal entities.
 There could be one or more interpreters in a process, and one or
 more "hosts", with free association between them.
+
+=head2 perl5-mt: thread-safe XS modules
+
+perl5-mt runs worker interpreters that share a sealed boot image in one
+process (see F<MT_README.md>).  An XS module is called from workers in one
+of two ways, decided when C<DynaLoader> loads its shared object:
+
+=over 4
+
+=item *
+
+A module compiled with C<-DPERL_XS_THREADSAFE=1> declares that its C code
+may run in several interpreters at once (no process-global mutable state
+without locking, per-interpreter state in C<MY_CXT> with a C<CLONE>
+method).  F<XSUB.h> then makes C<XS_EXTERNAL> emit an exported marker
+object C<mt_threadsafe_boot_Foo__Bar> next to the boot function; the
+loader finds it, runs the boot in-process and stamps every XSUB it defines
+C<CVf_MT_THREADSAFE>.  Such a module B<must> define C<PERL_NO_GET_CONTEXT>
+before including F<perl.h>: each XSUB receives the calling worker's
+interpreter as C<aTHX>, and the header refuses to compile otherwise.  The
+marker is C only.
+
+=item *
+
+A module without the marker is assumed to be legacy code: while workers
+are active it is loaded into an XS compartment, a child process forked at
+the freeze, and the host gets a stub (C<CVf_MT_REMOTE>) for every XSUB,
+whose call is marshalled across.  Listing the module in
+C<%MT::XS::inprocess_ok> asserts that it is safe after all and loads it
+in-process.
+
+=back
+
+C<MT::XS::is_threadsafe(\&sub)> and C<MT::XS::is_remote(\&sub)> report
+which tier a sub belongs to.
 
 =head1 Internal Functions
 

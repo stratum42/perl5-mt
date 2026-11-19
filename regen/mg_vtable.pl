@@ -217,6 +217,8 @@ my %mg =
                     desc => 'Inlining/mutation of call to this CV'},
      debugvar => { char => '*', desc => '$DB::single, signal, trace vars',
                    vtable => 'debugvar' },
+     mt_cap => { char => 'M', vtable => 'mt_cap',
+                 desc => 'perl5-mt capability handle' },
      lvref => { char => '\\', vtable => 'lvref',
                   desc => "Lvalue reference constructor" },
      destruct => {
@@ -305,6 +307,7 @@ my %vtable_conf =
      'debugvar' => { set => 'setdebugvar', get => 'getdebugvar' },
      'lvref' => {set => 'setlvref'},
      'destruct' => {free => 'freedestruct'},
+     'mt_cap' => {free => 'freemtcap', dup => 'dupmtcap'},
 );
 
 

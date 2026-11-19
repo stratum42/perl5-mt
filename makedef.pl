@@ -558,12 +558,16 @@ unless ($define{'MULTIPLICITY'}) {
     ++$skip{$_} foreach qw(
 		    PL_interp_size
 		    PL_interp_size_5_18_0
+			 );
+}
+
+# perl5-mt: the immortals are always aliases of PL_sv_immortals[] (perl.h)
+++$skip{$_} foreach qw(
                     PL_sv_yes
                     PL_sv_undef
                     PL_sv_no
                     PL_sv_zero
-			 );
-}
+                    );
 
 unless ($define{HAS_MMAP}) {
     ++$skip{PL_mmap_page_size};

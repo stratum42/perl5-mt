@@ -266,7 +266,59 @@ Perl_CvDEPTH(const CV * const sv)
     PERL_ARGS_ASSERT_CVDEPTH;
     assert(SvTYPE(sv) == SVt_PVCV || SvTYPE(sv) == SVt_PVFM);
 
+    /* perl5-mt: a CV in the sealed boot image keeps its recursion depth in
+     * the per-worker table (mt_worker.c), never in the shared body */
+    if (UNLIKELY(SvFLAGS(sv) & SVf_IMMORTAL))
+        return Perl_mt_cv_depth_p(sv);
+
     return &((XPVCV*)SvANY(sv))->xcv_depth;
+}
+
+/*
+=for apidoc mt_pm_getre
+perl5-mt: implements C<PM_GETRE> under ithreads.  Returns the regexp of the
+match op C<o> from this interpreter's regex pad, copying it out of the
+boot image on first use (Perl_mt_regex_materialize, mt_worker.c): regexp
+heads hold match state, so a worker never matches against an immortal.
+
+=cut
+*/
+
+#ifdef USE_ITHREADS
+PERL_STATIC_INLINE REGEXP *
+Perl_mt_pm_getre(pTHX_ const PMOP *o)
+{
+    SV *re;
+    PERL_ARGS_ASSERT_MT_PM_GETRE;
+
+    re = PL_regex_pad[o->op_pmoffset];
+    if (SvTYPE(re) != SVt_REGEXP)
+        return NULL;
+    if (UNLIKELY(SvFLAGS(re) & SVf_IMMORTAL))
+        return Perl_mt_regex_materialize(aTHX_ (PMOP *)o);
+    return (REGEXP *)re;
+}
+#endif
+
+/*
+=for apidoc CvPADLISTp
+perl5-mt: returns a pointer to the padlist slot of C<cv>: the body field
+for an ordinary CV, or the per-worker table entry (materialised on first
+use from the frozen template) for a CV in the sealed boot image.
+
+=cut
+*/
+
+PERL_STATIC_INLINE PADLIST **
+Perl_CvPADLISTp(const CV * const cv)
+{
+    PERL_ARGS_ASSERT_CVPADLISTP;
+    assert(!CvISXSUB(cv));
+
+    if (UNLIKELY(SvFLAGS(cv) & SVf_IMMORTAL))
+        return Perl_mt_padlist_p(cv);
+
+    return &((XPVCV*)SvANY(cv))->xcv_padlist_u.xcv_padlist;
 }
 
 /*
@@ -587,8 +639,10 @@ Perl_rpp_popfree_2_NN(pTHX)
         /* at least one of the old SVs needs freeing. Do it the long way */
         Perl_rpp_free_2_(aTHX_ sv1, sv2, rc1, rc2);
     else {
-        SvREFCNT(sv1) = rc1 - 1;
-        SvREFCNT(sv2) = rc2 - 1;
+        if (!(SvFLAGS(sv1) & SVf_IMMORTAL))   /* perl5-mt */
+            SvREFCNT(sv1) = rc1 - 1;
+        if (!(SvFLAGS(sv2) & SVf_IMMORTAL))
+            SvREFCNT(sv2) = rc2 - 1;
     }
     PL_stack_sp--;
 #else
@@ -890,8 +944,10 @@ Perl_rpp_replace_2_1_COMMON(pTHX_ SV *sv)
         /* at least one of the old SVs needs freeing. Do it the long way */
         Perl_rpp_free_2_(aTHX_ sv1, sv2, rc1, rc2);
     else {
-        SvREFCNT(sv1) = rc1 - 1;
-        SvREFCNT(sv2) = rc2 - 1;
+        if (!(SvFLAGS(sv1) & SVf_IMMORTAL))   /* perl5-mt */
+            SvREFCNT(sv1) = rc1 - 1;
+        if (!(SvFLAGS(sv2) & SVf_IMMORTAL))
+            SvREFCNT(sv2) = rc2 - 1;
     }
 #else
     *--PL_stack_sp = sv;
@@ -1185,6 +1241,12 @@ Perl_rpp_invoke_xs(pTHX_ CV *cv)
 {
     PERL_ARGS_ASSERT_RPP_INVOKE_XS;
 
+    /* perl5-mt: a stub for an XSUB living in an XS compartment (the
+     * legacy tier of the two-tier dispatcher) is served out of process */
+    if (UNLIKELY(CvFLAGS(cv) & CVf_MT_REMOTE)) {
+        Perl_mt_xs_remote_call(aTHX_ cv);
+        return;
+    }
 #ifdef PERL_RC_STACK
     if (!CvXS_RCSTACK(cv))
         Perl_xs_wrap(aTHX_ CvXSUB(cv), cv);
@@ -1354,6 +1416,26 @@ Perl_is_utf8_invariant_string_loc(const U8* const s, STRLEN len, const U8 ** ep)
     }
 
     send = s + len;
+
+#ifndef EBCDIC
+
+    /* perl5-mt: the SIMD scan finds the first variant byte directly;
+     * the word-at-a-time code below stays for short strings */
+    if (PERL_SIMD_ON() && len >= PERL_SIMD_MIN_LEN) {
+        const STRLEN n = PERL_SIMD_DISPATCH(perl_simd_ascii_span, s, len);
+
+        if (n == len) {
+            return TRUE;
+        }
+
+        if (ep) {
+            *ep = s + n;
+        }
+
+        return FALSE;
+    }
+
+#endif
 
 /* This looks like 0x010101... */
 #  define PERL_COUNT_MULTIPLIER   (~ (UINTMAX_C(0)) / 0xFF)
@@ -1915,6 +1997,11 @@ S_variant_under_utf8_count(const U8* const s, const U8* const e)
 
 #  ifndef EBCDIC
 
+    /* perl5-mt: long strings count their high-bit bytes with SIMD */
+    if (PERL_SIMD_ON() && (STRLEN) (e - x) >= PERL_SIMD_MIN_LEN) {
+        return PERL_SIMD_DISPATCH(perl_simd_count_high, s, (STRLEN) (e - s));
+    }
+
     /* Test if the string is long enough to use word-at-a-time.  (Logic is the
      * same as for is_utf8_invariant_string()) */
     if ((STRLEN) (e - x) >= PERL_WORDSIZE
@@ -2256,14 +2343,60 @@ Perl_is_utf8_string_loclen(const U8 *s, STRLEN len, const U8 **ep, STRLEN *el)
         const U8* const send = s + len;
         const U8* x = first_variant;
         STRLEN outlen = first_variant - s;
+        const U8* simd_retry = x;
 
-        while (x < send) {
-            const STRLEN cur_len = isUTF8_CHAR(x, send);
-            if (UNLIKELY(! cur_len)) {
-                break;
+        if (! PERL_SIMD_ON()) {
+            /* the upstream loop, unchanged */
+            while (x < send) {
+                const STRLEN cur_len = isUTF8_CHAR(x, send);
+                if (UNLIKELY(! cur_len)) {
+                    break;
+                }
+                x += cur_len;
+                outlen++;
             }
-            x += cur_len;
-            outlen++;
+        }
+        else while (x < send) {
+
+            /* perl5-mt: a window that classifies as well-formed or
+             * ASCII is counted without a call per character.  After a window
+             * that does not classify, the per-character code runs for the next
+             * PERL_SIMD_UTF8_CHUNK bytes before the next try. */
+            if (x >= simd_retry && (STRLEN) (send - x) >= PERL_SIMD_MIN_LEN) {
+                STRLEN window = (STRLEN) (send - x);
+                STRLEN consumed = 0;
+                int kind;
+
+                if (window > PERL_SIMD_UTF8_CHUNK) {
+                    window = PERL_SIMD_UTF8_CHUNK;
+                }
+
+                kind = PERL_SIMD_DISPATCH(perl_simd_utf8_classify, x, window,
+                                          &consumed);
+                if (kind == PERL_SIMD_UTF8_ALL_ASCII) {
+                    x += window;
+                    outlen += window;
+                    continue;
+                }
+
+                if (kind == PERL_SIMD_UTF8_WELL_FORMED) {
+                    outlen += PERL_SIMD_DISPATCH(perl_simd_utf8_char_count, x,
+                                                 consumed);
+                    x += consumed;
+                    continue;
+                }
+
+                simd_retry = x + PERL_SIMD_UTF8_CHUNK;
+            }
+
+            {
+                const STRLEN cur_len = isUTF8_CHAR(x, send);
+                if (UNLIKELY(! cur_len)) {
+                    break;
+                }
+                x += cur_len;
+                outlen++;
+            }
         }
 
         if (el)
@@ -2785,14 +2918,64 @@ Perl_is_utf8_string_loclen_flags(const U8 *s, STRLEN len, const U8 **ep, STRLEN 
         const U8* send = s + len;
         const U8* x = first_variant;
         STRLEN outlen = first_variant - s;
+        const U8* simd_retry = x;
 
-        while (x < send) {
-            const STRLEN cur_len = isUTF8_CHAR_flags(x, send, flags);
-            if (UNLIKELY(! cur_len)) {
-                break;
+        /* perl5-mt: a well-formed window is accepted here only when the
+         * flags reject none of surrogates, non-characters and above-Unicode; an
+         * ASCII window is always accepted (see is_utf8_string_loclen) */
+        const bool simd_well_formed_ok
+                            = (flags & (UTF8_DISALLOW_SURROGATE
+                                       |UTF8_DISALLOW_NONCHAR
+                                       |UTF8_DISALLOW_SUPER)) == 0;
+
+        if (! PERL_SIMD_ON()) {
+            /* the upstream loop, unchanged */
+            while (x < send) {
+                const STRLEN cur_len = isUTF8_CHAR_flags(x, send, flags);
+                if (UNLIKELY(! cur_len)) {
+                    break;
+                }
+                x += cur_len;
+                outlen++;
             }
-            x += cur_len;
-            outlen++;
+        }
+        else while (x < send) {
+
+            if (x >= simd_retry && (STRLEN) (send - x) >= PERL_SIMD_MIN_LEN) {
+                STRLEN window = (STRLEN) (send - x);
+                STRLEN consumed = 0;
+                int kind;
+
+                if (window > PERL_SIMD_UTF8_CHUNK) {
+                    window = PERL_SIMD_UTF8_CHUNK;
+                }
+
+                kind = PERL_SIMD_DISPATCH(perl_simd_utf8_classify, x, window,
+                                          &consumed);
+                if (kind == PERL_SIMD_UTF8_ALL_ASCII) {
+                    x += window;
+                    outlen += window;
+                    continue;
+                }
+
+                if (kind == PERL_SIMD_UTF8_WELL_FORMED && simd_well_formed_ok) {
+                    outlen += PERL_SIMD_DISPATCH(perl_simd_utf8_char_count, x,
+                                                 consumed);
+                    x += consumed;
+                    continue;
+                }
+
+                simd_retry = x + PERL_SIMD_UTF8_CHUNK;
+            }
+
+            {
+                const STRLEN cur_len = isUTF8_CHAR_flags(x, send, flags);
+                if (UNLIKELY(! cur_len)) {
+                    break;
+                }
+                x += cur_len;
+                outlen++;
+            }
         }
 
         if (el)
@@ -3648,6 +3831,7 @@ Perl_cx_pushsub(pTHX_ PERL_CONTEXT *cx, CV *cv, OP *retop, bool hasargs)
     PL_curstackinfo->si_cxsubix = (I32)(cx - PL_curstackinfo->si_cxstack);
     cx->blk_sub.cv = cv;
     cx->blk_sub.olddepth = CvDEPTH(cv);
+    cx->blk_sub.paddepth = 0;
     cx->blk_sub.prevcomppad = PL_comppad;
     cx->cx_type |= (hasargs) ? CXp_HASARGS : 0;
     cx->blk_sub.retop = retop;
@@ -3669,7 +3853,7 @@ Perl_cx_popsub_common(pTHX_ PERL_CONTEXT *cx)
     PL_comppad = cx->blk_sub.prevcomppad;
     PL_curpad = LIKELY(PL_comppad != NULL) ? AvARRAY(PL_comppad) : NULL;
     cv = cx->blk_sub.cv;
-    CvDEPTH(cv) = cx->blk_sub.olddepth;
+    MT_PAD_RELEASE(cx, cv);
     cx->blk_sub.cv = NULL;
     SvREFCNT_dec(cv);
     PL_curstackinfo->si_cxsubix = cx->blk_sub.old_cxsubix;

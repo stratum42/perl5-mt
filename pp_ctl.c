@@ -2432,10 +2432,12 @@ PP(pp_dbstate)
 #ifndef PERL_RC_STACK
             SAVESTACK_POS();
 #endif
-            CvDEPTH(cv)++;
-            if (CvDEPTH(cv) >= 2)
-                pad_push(CvPADLIST(cv), CvDEPTH(cv));
-            PAD_SET_CUR_NOSAVE(CvPADLIST(cv), CvDEPTH(cv));
+            {
+                PADLIST * const db_padlist = CvPADLIST(cv);
+                I32 db_depth;
+                MT_PAD_ACQUIRE(cx, cv, db_padlist, db_depth);
+                PAD_SET_CUR_NOSAVE(db_padlist, db_depth);
+            }
             return CvSTART(cv);
         }
     }
@@ -3294,7 +3296,7 @@ PP(pp_goto)
             }
 
             if (CxTYPE(cx) == CXt_SUB) {
-                CvDEPTH(cx->blk_sub.cv) = cx->blk_sub.olddepth;
+                MT_PAD_RELEASE(cx, cx->blk_sub.cv);
                 /*on XS calls defer freeing the old CV as it could
                  * prematurely set PL_op to NULL, which could cause
                  * e..g XS subs using GIMME_V to SEGV */
@@ -3399,16 +3401,19 @@ PP(pp_goto)
 
                 cx->blk_sub.cv = cv;
                 cx->blk_sub.olddepth = CvDEPTH(cv);
+                cx->blk_sub.paddepth = 0;
 
-                CvDEPTH(cv)++;
-                SvREFCNT_inc_simple_void_NN(cv);
-                if (CvDEPTH(cv) > 1) {
-                    if (CvDEPTH(cv) == PERL_SUB_DEPTH_WARN && ckWARN(WARN_RECURSION))
+                {
+                    I32 goto_depth;
+                    MT_PAD_ACQUIRE(cx, cv, padlist, goto_depth);
+                    SvREFCNT_inc_simple_void_NN(cv);
+                    if (goto_depth == PERL_SUB_DEPTH_WARN
+                        && (!PL_mt_fibers || cx->blk_sub.olddepth > 0)
+                        && ckWARN(WARN_RECURSION))
                         sub_crush_depth(cv);
-                    pad_push(padlist, CvDEPTH(cv));
+                    PL_curcop = cx->blk_oldcop;
+                    PAD_SET_CUR_NOSAVE(padlist, goto_depth);
                 }
-                PL_curcop = cx->blk_oldcop;
-                PAD_SET_CUR_NOSAVE(padlist, CvDEPTH(cv));
 
                 if (CxHASARGS(cx))
                 {

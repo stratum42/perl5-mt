@@ -402,6 +402,11 @@ Perl_boot_core_mro(pTHX)
         __attribute__visibility__("hidden");
 #define PERL_ARGS_ASSERT_BOOT_CORE_MRO
 
+PERL_CALLCONV void
+Perl_boot_core_mt(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_BOOT_CORE_MT
+
 PERL_CALLCONV OP *
 Perl_build_infix_plugin(pTHX_ OP *lhs, OP *rhs, void *tokendata)
         __attribute__visibility__("hidden");
@@ -626,6 +631,16 @@ PERL_STATIC_NO_RET void
 Perl_croak_memory_wrap(void)
         __attribute__noreturn__;
 #define PERL_ARGS_ASSERT_CROAK_MEMORY_WRAP
+
+PERL_CALLCONV_NO_RET void
+Perl_croak_mt(pTHX_ int code)
+        __attribute__noreturn__;
+#define PERL_ARGS_ASSERT_CROAK_MT
+
+PERL_CALLCONV_NO_RET void
+Perl_croak_mt_nocontext(int code)
+        __attribute__noreturn__;
+#define PERL_ARGS_ASSERT_CROAK_MT_NOCONTEXT
 
 PERL_CALLCONV_NO_RET void
 Perl_croak_no_mem(void)
@@ -1203,6 +1218,10 @@ Perl_free_tied_hv_pool(pTHX)
 PERL_CALLCONV void
 Perl_free_tmps(pTHX);
 #define PERL_ARGS_ASSERT_FREE_TMPS
+
+PERL_CALLCONV void
+Perl_freeze_boot_image(pTHX);
+#define PERL_ARGS_ASSERT_FREEZE_BOOT_IMAGE
 
 PERL_CALLCONV SV *
 Perl_get_and_check_backslash_N_name(pTHX_ const char *s, const char *e, const bool is_utf8, const char **error_msg)
@@ -2090,6 +2109,12 @@ Perl_magic_dump(pTHX_ const MAGIC *mg);
 #define PERL_ARGS_ASSERT_MAGIC_DUMP
 
 PERL_CALLCONV int
+Perl_magic_dupmtcap(pTHX_ MAGIC *mg, CLONE_PARAMS *param)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MAGIC_DUPMTCAP         \
+        assert(mg); assert(param)
+
+PERL_CALLCONV int
 Perl_magic_existspack(pTHX_ SV *sv, const MAGIC *mg)
         __attribute__visibility__("hidden");
 #define PERL_ARGS_ASSERT_MAGIC_EXISTSPACK       \
@@ -2111,6 +2136,12 @@ PERL_CALLCONV int
 Perl_magic_freemglob(pTHX_ SV *sv, MAGIC *mg)
         __attribute__visibility__("hidden");
 #define PERL_ARGS_ASSERT_MAGIC_FREEMGLOB        \
+        assert(sv); assert(mg)
+
+PERL_CALLCONV int
+Perl_magic_freemtcap(pTHX_ SV *sv, MAGIC *mg)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MAGIC_FREEMTCAP        \
         assert(sv); assert(mg)
 
 PERL_CALLCONV int
@@ -2569,6 +2600,673 @@ PERL_CALLCONV SV *
 Perl_mro_set_private_data(pTHX_ struct mro_meta * const smeta, const struct mro_alg * const which, SV * const data);
 #define PERL_ARGS_ASSERT_MRO_SET_PRIVATE_DATA   \
         assert(smeta); assert(which); assert(data)
+
+PERL_CALLCONV void
+Perl_mt_aio_destroy(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_AIO_DESTROY
+
+PERL_CALLCONV void
+Perl_mt_aio_drain_completions(pTHX_ int *woke)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_AIO_DRAIN_COMPLETIONS
+
+PERL_CALLCONV void
+Perl_mt_aio_reset(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_AIO_RESET
+
+PERL_CALLCONV IV
+Perl_mt_aio_run(pTHX_ perl_krt_sqe_t *q)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_AIO_RUN             \
+        assert(q)
+
+PERL_CALLCONV void *
+Perl_mt_arena_alloc(size_t size)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_ARENA_ALLOC
+
+PERL_CALLCONV bool
+Perl_mt_arena_contains(const void *p)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_ARENA_CONTAINS      \
+        assert(p)
+
+PERL_CALLCONV int
+Perl_mt_arena_create(pTHX_ size_t size)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_ARENA_CREATE
+
+PERL_CALLCONV size_t
+Perl_mt_arena_size(const void *p)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_ARENA_SIZE          \
+        assert(p)
+
+PERL_CALLCONV void
+Perl_mt_boot_cap(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_CAP
+
+PERL_CALLCONV void
+Perl_mt_boot_chan(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_CHAN
+
+PERL_CALLCONV void
+Perl_mt_boot_fiber(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_FIBER
+
+PERL_CALLCONV void
+Perl_mt_boot_io(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_IO
+
+PERL_CALLCONV void
+Perl_mt_boot_worker(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_WORKER
+
+PERL_CALLCONV void
+Perl_mt_boot_xs(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_BOOT_XS
+
+PERL_CALLCONV U32
+Perl_mt_cap_count(pTHX_ SV *handle);
+#define PERL_ARGS_ASSERT_MT_CAP_COUNT           \
+        assert(handle)
+
+PERL_CALLCONV void
+Perl_mt_cap_drop(pTHX_ SV *handle);
+#define PERL_ARGS_ASSERT_MT_CAP_DROP            \
+        assert(handle)
+
+PERL_CALLCONV SV *
+Perl_mt_cap_get(pTHX_ SV *handle);
+#define PERL_ARGS_ASSERT_MT_CAP_GET             \
+        assert(handle)
+
+PERL_CALLCONV SV *
+Perl_mt_cap_handle_new(pTHX_ U32 slot, U32 gen);
+#define PERL_ARGS_ASSERT_MT_CAP_HANDLE_NEW
+
+PERL_CALLCONV void
+Perl_mt_cap_init(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CAP_INIT
+
+PERL_CALLCONV bool
+Perl_mt_cap_is_handle(pTHX_ SV *sv);
+#define PERL_ARGS_ASSERT_MT_CAP_IS_HANDLE       \
+        assert(sv)
+
+PERL_CALLCONV SV *
+Perl_mt_cap_mint(pTHX_ SV *value);
+#define PERL_ARGS_ASSERT_MT_CAP_MINT            \
+        assert(value)
+
+PERL_CALLCONV U32
+Perl_mt_cap_reap(pTHX);
+#define PERL_ARGS_ASSERT_MT_CAP_REAP
+
+PERL_CALLCONV void
+Perl_mt_cap_share(pTHX_ SV *handle, U32 *slot, U32 *gen);
+#define PERL_ARGS_ASSERT_MT_CAP_SHARE           \
+        assert(handle); assert(slot); assert(gen)
+
+PERL_CALLCONV SV *
+Perl_mt_cap_stats(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CAP_STATS
+
+PERL_CALLCONV void
+Perl_mt_cap_worker_exit(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CAP_WORKER_EXIT
+
+PERL_CALLCONV void
+Perl_mt_cap_worker_start(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CAP_WORKER_START
+
+PERL_CALLCONV void
+Perl_mt_chan_drain(pTHX_ int *woke)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CHAN_DRAIN
+
+PERL_CALLCONV void
+Perl_mt_chan_idle_wait(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CHAN_IDLE_WAIT
+
+PERL_CALLCONV int
+Perl_mt_ctx_shstk_active(void)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_CTX_SHSTK_ACTIVE
+
+PERL_CALLCONV I32 *
+Perl_mt_cv_depth_p(const CV *cv);
+#define PERL_ARGS_ASSERT_MT_CV_DEPTH_P          \
+        assert(cv)
+
+PERL_CALLCONV bool
+Perl_mt_cv_shareable(const CV *cv);
+#define PERL_ARGS_ASSERT_MT_CV_SHAREABLE        \
+        assert(cv)
+
+PERL_CALLCONV const char *
+Perl_mt_err_msg(int code);
+#define PERL_ARGS_ASSERT_MT_ERR_MSG
+
+PERL_CALLCONV const char *
+Perl_mt_err_name(int code);
+#define PERL_ARGS_ASSERT_MT_ERR_NAME
+
+PERL_CALLCONV void
+Perl_mt_fiber_destroy(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_FIBER_DESTROY
+
+PERL_CALLCONV void
+Perl_mt_fiber_init(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_FIBER_INIT
+
+PERL_CALLCONV void
+Perl_mt_fiber_resume(pTHX_ struct mt_fiber *fiber)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_FIBER_RESUME        \
+        assert(fiber)
+
+PERL_CALLCONV void
+Perl_mt_fiber_yield(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_FIBER_YIELD
+
+PERL_CALLCONV GP *
+Perl_mt_gp_materialize(pTHX_ GV *gv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_GP_MATERIALIZE      \
+        assert(gv)
+
+PERL_CALLCONV void
+Perl_mt_gp_release(pTHX_ GP *gp)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_GP_RELEASE          \
+        assert(gp)
+
+PERL_CALLCONV GV *
+Perl_mt_gv_init_private(pTHX_ HV *stash, SV *slot, const char *name, STRLEN len, U32 flags)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_GV_INIT_PRIVATE     \
+        assert(stash); assert(slot); assert(name)
+
+PERL_CALLCONV STRLEN *
+Perl_mt_gvflags_p(GV *gv);
+#define PERL_ARGS_ASSERT_MT_GVFLAGS_P           \
+        assert(gv)
+
+PERL_CALLCONV GP *
+Perl_mt_gvgp(GV *gv);
+#define PERL_ARGS_ASSERT_MT_GVGP                \
+        assert(gv)
+
+PERL_CALLCONV void
+Perl_mt_gvgp_set(GV *gv, GP *gp);
+#define PERL_ARGS_ASSERT_MT_GVGP_SET            \
+        assert(gv)
+
+PERL_CALLCONV bool
+Perl_mt_hv_amagic_nocontext(const HV *hv);
+#define PERL_ARGS_ASSERT_MT_HV_AMAGIC_NOCONTEXT \
+        assert(hv)
+
+PERL_CALLCONV void
+Perl_mt_hv_amagic_set_nocontext(HV *hv, U8 state);
+#define PERL_ARGS_ASSERT_MT_HV_AMAGIC_SET_NOCONTEXT \
+        assert(hv)
+
+PERL_CALLCONV struct xpvhv_aux *
+Perl_mt_hv_aux(pTHX_ HV *hv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_HV_AUX              \
+        assert(hv)
+
+PERL_CALLCONV struct xpvhv_aux *
+Perl_mt_hv_aux_nocontext(HV *hv);
+#define PERL_ARGS_ASSERT_MT_HV_AUX_NOCONTEXT    \
+        assert(hv)
+
+PERL_CALLCONV void *
+Perl_mt_hv_common_immortal(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen, int flags, int action, SV *val, U32 hash)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_HV_COMMON_IMMORTAL  \
+        assert(hv)
+
+PERL_CALLCONV SV *
+Perl_mt_image_stats(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_IMAGE_STATS
+
+PERL_CALLCONV void
+Perl_mt_padlist_free(pTHX_ PADLIST *padlist)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_PADLIST_FREE        \
+        assert(padlist)
+
+PERL_CALLCONV PADLIST *
+Perl_mt_padlist_materialize(pTHX_ const CV *cv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_PADLIST_MATERIALIZE \
+        assert(cv)
+
+PERL_CALLCONV PADLIST **
+Perl_mt_padlist_p(const CV *cv);
+#define PERL_ARGS_ASSERT_MT_PADLIST_P           \
+        assert(cv)
+
+PERL_CALLCONV REGEXP *
+Perl_mt_regex_materialize(pTHX_ PMOP *o);
+#define PERL_ARGS_ASSERT_MT_REGEX_MATERIALIZE   \
+        assert(o)
+
+PERL_CALLCONV void
+Perl_mt_sched_arm(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_ARM
+
+PERL_CALLCONV void
+Perl_mt_sched_idle(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_IDLE
+
+PERL_CALLCONV void
+Perl_mt_sched_park(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_PARK
+
+PERL_CALLCONV void
+Perl_mt_sched_pass(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_PASS
+
+PERL_CALLCONV void
+Perl_mt_sched_poll(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_POLL
+
+PERL_CALLCONV void
+Perl_mt_sched_ready(pTHX_ struct mt_fiber *fiber)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_READY         \
+        assert(fiber)
+
+PERL_CALLCONV U32
+Perl_mt_sched_run(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_RUN
+
+PERL_CALLCONV void
+Perl_mt_sched_wake(pTHX_ struct mt_fiber *fiber)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_SCHED_WAKE          \
+        assert(fiber)
+
+PERL_CALLCONV MAGIC *
+Perl_mt_stash_amt(pTHX_ HV *stash)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_STASH_AMT           \
+        assert(stash)
+
+PERL_CALLCONV void
+Perl_mt_stash_amt_remove(pTHX_ HV *stash)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_STASH_AMT_REMOVE    \
+        assert(stash)
+
+PERL_CALLCONV void
+Perl_mt_stash_amt_set(pTHX_ HV *stash, const void *amt, STRLEN len)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_STASH_AMT_SET       \
+        assert(stash); assert(amt)
+
+PERL_CALLCONV bool
+Perl_mt_sv_is_shared_kind(const SV *sv);
+#define PERL_ARGS_ASSERT_MT_SV_IS_SHARED_KIND   \
+        assert(sv)
+
+PERL_CALLCONV void
+Perl_mt_value_free(perl_mt_value_t *v);
+#define PERL_ARGS_ASSERT_MT_VALUE_FREE          \
+        assert(v)
+
+PERL_CALLCONV void
+Perl_mt_value_from_sv(pTHX_ perl_mt_value_t *v, SV *sv);
+#define PERL_ARGS_ASSERT_MT_VALUE_FROM_SV       \
+        assert(v)
+
+PERL_CALLCONV SV *
+Perl_mt_value_to_sv(pTHX_ const perl_mt_value_t *v);
+#define PERL_ARGS_ASSERT_MT_VALUE_TO_SV         \
+        assert(v)
+
+PERL_CALLCONV SV *
+Perl_mt_worker_join(pTHX_ U32 id);
+#define PERL_ARGS_ASSERT_MT_WORKER_JOIN
+
+PERL_CALLCONV void
+Perl_mt_worker_join_all(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_WORKER_JOIN_ALL
+
+PERL_CALLCONV U32
+Perl_mt_worker_spawn(pTHX_ SV *name, SV **args, U32 nargs);
+#define PERL_ARGS_ASSERT_MT_WORKER_SPAWN        \
+        assert(name)
+
+PERL_CALLCONV void
+Perl_mt_worker_tables_free(pTHX_ bool svs_gone)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_WORKER_TABLES_FREE
+
+PERL_CALLCONV void
+Perl_mt_worker_tables_init(pTHX_ const struct perl_mt_image *img)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_WORKER_TABLES_INIT  \
+        assert(img)
+
+PERL_CALLCONV void
+Perl_mt_worker_tables_release(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_WORKER_TABLES_RELEASE
+
+PERL_CALLCONV bool
+Perl_mt_xs_affinity(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_AFFINITY
+
+PERL_CALLCONV void *
+Perl_mt_xs_arena_alloc(pTHX_ U32 slot, size_t len, U64 *off)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_ARENA_ALLOC      \
+        assert(off)
+
+PERL_CALLCONV void *
+Perl_mt_xs_arena_at(pTHX_ U32 slot, U64 off, U64 len)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_ARENA_AT
+
+PERL_CALLCONV bool
+Perl_mt_xs_arena_full(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_ARENA_FULL
+
+PERL_CALLCONV void
+Perl_mt_xs_arena_reset(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_ARENA_RESET
+
+PERL_CALLCONV int
+Perl_mt_xs_bell(pTHX_ U32 *doorbell)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BELL             \
+        assert(doorbell)
+
+PERL_CALLCONV int
+Perl_mt_xs_bell_changed(pTHX_ U32 doorbell)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BELL_CHANGED
+
+PERL_CALLCONV void
+Perl_mt_xs_bell_wait(pTHX_ U32 doorbell, uint64_t timeout_ns)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BELL_WAIT
+
+PERL_CALLCONV I32
+Perl_mt_xs_bind_comp(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BIND_COMP
+
+PERL_CALLCONV void
+Perl_mt_xs_boot_bridge(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BOOT_BRIDGE
+
+PERL_CALLCONV void
+Perl_mt_xs_boot_wrapper(pTHX_ CV *cv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_BOOT_WRAPPER     \
+        assert(cv)
+
+PERL_CALLCONV bool
+Perl_mt_xs_comp_alive(pTHX_ U32 comp, U32 gen)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_COMP_ALIVE
+
+PERL_CALLCONV U32
+Perl_mt_xs_comp_count(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_COMP_COUNT
+
+PERL_CALLCONV U32
+Perl_mt_xs_comp_gen(pTHX_ U32 comp)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_COMP_GEN
+
+PERL_CALLCONV void
+Perl_mt_xs_comp_serve(pTHX_ const mt_xs_frame_t *f)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_COMP_SERVE       \
+        assert(f)
+
+PERL_CALLCONV bool
+Perl_mt_xs_comp_wait_cb(pTHX_ U32 slot, U32 depth, mt_xs_frame_t *out)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_COMP_WAIT_CB     \
+        assert(out)
+
+PERL_CALLCONV bool
+Perl_mt_xs_dl_find_symbol(pTHX_ void *libref, const char *symbolname, IV *out, const char **err);
+#define PERL_ARGS_ASSERT_MT_XS_DL_FIND_SYMBOL   \
+        assert(symbolname); assert(out); assert(err)
+
+PERL_CALLCONV void *
+Perl_mt_xs_dl_lib_new(pTHX_ void *handle, const char *path);
+#define PERL_ARGS_ASSERT_MT_XS_DL_LIB_NEW       \
+        assert(handle); assert(path)
+
+PERL_CALLCONV bool
+Perl_mt_xs_dl_unload(pTHX_ void *libref);
+#define PERL_ARGS_ASSERT_MT_XS_DL_UNLOAD
+
+PERL_CALLCONV void
+Perl_mt_xs_drain(pTHX_ int *woke)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_DRAIN
+
+PERL_CALLCONV U64
+Perl_mt_xs_export_sv(pTHX_ SV *sv, bool permanent)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_EXPORT_SV        \
+        assert(sv)
+
+PERL_CALLCONV SV *
+Perl_mt_xs_exported_sv(pTHX_ U64 ptr)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_EXPORTED_SV
+
+PERL_CALLCONV void
+Perl_mt_xs_handle_free(pTHX_ perl_mt_cap_ref_t *ref)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HANDLE_FREE      \
+        assert(ref)
+
+PERL_CALLCONV SV *
+Perl_mt_xs_handle_new(pTHX_ U32 comp, U32 gen, U64 ptr, U8 reftype, bool proxy, const char *rclass, STRLEN rclasslen, const char *blessinto, STRLEN blesslen)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HANDLE_NEW
+
+PERL_CALLCONV perl_mt_cap_ref_t *
+Perl_mt_xs_handle_ref(pTHX_ SV *sv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HANDLE_REF       \
+        assert(sv)
+
+PERL_CALLCONV void
+Perl_mt_xs_host_callback(pTHX_ U32 comp, const mt_xs_frame_t *f)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HOST_CALLBACK    \
+        assert(f)
+
+PERL_CALLCONV void
+Perl_mt_xs_host_handles_free(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HOST_HANDLES_FREE
+
+PERL_CALLCONV void
+Perl_mt_xs_host_hrel(pTHX_ const mt_xs_frame_t *f)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_HOST_HREL        \
+        assert(f)
+
+PERL_CALLCONV U32
+Perl_mt_xs_in_call_depth(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_IN_CALL_DEPTH
+
+PERL_CALLCONV void
+Perl_mt_xs_in_call_enter(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_IN_CALL_ENTER
+
+PERL_CALLCONV void
+Perl_mt_xs_in_call_leave(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_IN_CALL_LEAVE
+
+PERL_CALLCONV bool
+Perl_mt_xs_in_compartment(void)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_IN_COMPARTMENT
+
+PERL_CALLCONV U32
+Perl_mt_xs_inflight_max(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_INFLIGHT_MAX
+
+PERL_CALLCONV CV *
+Perl_mt_xs_install_boot(pTHX_ const char *name, void *symref, const char *filename)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_INSTALL_BOOT     \
+        assert(name); assert(symref); assert(filename)
+
+PERL_CALLCONV void
+Perl_mt_xs_install_stub(pTHX_ const char *name, STRLEN len, U32 comp, U32 gen, U64 remote_cv, bool reported, const char *proto, STRLEN protolen)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_INSTALL_STUB     \
+        assert(name)
+
+PERL_CALLCONV void
+Perl_mt_xs_log_newxs(pTHX_ CV *cv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_LOG_NEWXS        \
+        assert(cv)
+
+PERL_CALLCONV U32
+Perl_mt_xs_my_comp(void)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_MY_COMP
+
+PERL_CALLCONV U32
+Perl_mt_xs_my_gen(void)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_MY_GEN
+
+PERL_CALLCONV U32
+Perl_mt_xs_next_seq(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_NEXT_SEQ
+
+PERL_CALLCONV void
+Perl_mt_xs_pool_start(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_POOL_START
+
+PERL_CALLCONV void
+Perl_mt_xs_pool_stop(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_POOL_STOP
+
+PERL_CALLCONV void
+Perl_mt_xs_post(pTHX_ U32 comp, const mt_xs_frame_t *f)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_POST             \
+        assert(f)
+
+PERL_CALLCONV void
+Perl_mt_xs_register_xsub(pTHX_ SV *name, CV *cv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REGISTER_XSUB    \
+        assert(name); assert(cv)
+
+PERL_CALLCONV void
+Perl_mt_xs_remote_call(pTHX_ CV *cv)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REMOTE_CALL      \
+        assert(cv)
+
+PERL_CALLCONV U32
+Perl_mt_xs_remote_load(pTHX_ SV *module, const char *path, U32 flags)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REMOTE_LOAD      \
+        assert(module)
+
+PERL_CALLCONV U32
+Perl_mt_xs_remote_load_in(pTHX_ U32 comp, SV *module, const char *path, U32 flags)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REMOTE_LOAD_IN   \
+        assert(module)
+
+PERL_CALLCONV void
+Perl_mt_xs_reply(pTHX_ const mt_xs_frame_t *f)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REPLY            \
+        assert(f)
+
+PERL_CALLCONV void
+Perl_mt_xs_reply_die_pv(pTHX_ const mt_xs_frame_t *req, const char *msg, STRLEN len)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_REPLY_DIE_PV     \
+        assert(req); assert(msg)
+
+PERL_CALLCONV U32
+Perl_mt_xs_slot(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_SLOT
+
+PERL_CALLCONV void
+Perl_mt_xs_slot_release(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_SLOT_RELEASE
+
+PERL_CALLCONV bool
+Perl_mt_xs_slot_waiting(pTHX_ U32 slot)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_SLOT_WAITING
+
+PERL_CALLCONV void
+Perl_mt_xs_unexport(pTHX_ U64 ptr)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_UNEXPORT
+
+PERL_CALLCONV void
+Perl_mt_xs_wait(pTHX_ U32 comp, U32 slot, U32 seq, mt_xs_frame_t *out)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_MT_XS_WAIT             \
+        assert(out)
 
 PERL_CALLCONV SV *
 Perl_multiconcat_stringify(pTHX_ const OP *o);
@@ -3262,6 +3960,15 @@ PERL_CALLCONV OP *
 Perl_op_prepend_elem(pTHX_ I32 optype, OP *first, OP *last);
 #define PERL_ARGS_ASSERT_OP_PREPEND_ELEM
 
+PERL_CALLCONV PADOFFSET
+Perl_op_refcnt_dec(pTHX_ OP *o);
+#define PERL_ARGS_ASSERT_OP_REFCNT_DEC          \
+        assert(o)
+
+PERL_CALLCONV OP *
+Perl_op_refcnt_inc(pTHX_ OP *o);
+#define PERL_ARGS_ASSERT_OP_REFCNT_INC
+
 PERL_CALLCONV void
 Perl_op_refcnt_lock(pTHX);
 #define PERL_ARGS_ASSERT_OP_REFCNT_LOCK
@@ -3493,6 +4200,10 @@ PERL_CALLCONV void
 perl_free(PerlInterpreter *my_perl);
 #define PERL_ARGS_ASSERT_PERL_FREE              \
         assert(my_perl)
+
+PERL_CALLCONV U32
+perl_mt_active_workers(pTHX);
+#define PERL_ARGS_ASSERT_PERL_MT_ACTIVE_WORKERS
 
 PERL_CALLCONV int
 perl_parse(PerlInterpreter *my_perl, XSINIT_t xsinit, int argc, char **argv, char **env);
@@ -4257,6 +4968,11 @@ PERL_CALLCONV Signal_t
 Perl_sighandler3(int sig, Siginfo_t *info, void *uap)
         __attribute__visibility__("hidden");
 #define PERL_ARGS_ASSERT_SIGHANDLER3
+
+PERL_CALLCONV void
+Perl_simd_detect(pTHX)
+        __attribute__visibility__("hidden");
+#define PERL_ARGS_ASSERT_SIMD_DETECT
 
 PERL_CALLCONV char *
 Perl_skipspace_flags(pTHX_ char *s, U32 flags)
@@ -6075,6 +6791,16 @@ Perl_sv_setsv_cow(pTHX_ SV *dsv, SV *ssv);
 #endif
 #if defined(PERL_CORE)
 PERL_CALLCONV void
+Perl_Slab_to_ro(pTHX_ OPSLAB *slab);
+# define PERL_ARGS_ASSERT_SLAB_TO_RO            \
+        assert(slab)
+
+PERL_CALLCONV void
+Perl_Slab_to_rw(pTHX_ OPSLAB * const slab);
+# define PERL_ARGS_ASSERT_SLAB_TO_RW            \
+        assert(slab)
+
+PERL_CALLCONV void
 Perl_opslab_force_free(pTHX_ OPSLAB *slab)
         __attribute__visibility__("hidden");
 # define PERL_ARGS_ASSERT_OPSLAB_FORCE_FREE     \
@@ -6098,18 +6824,6 @@ Perl_parser_free_nexttoke_ops(pTHX_ yy_parser *parser, OPSLAB *slab)
 # define PERL_ARGS_ASSERT_PARSER_FREE_NEXTTOKE_OPS \
         assert(parser); assert(slab)
 
-# if defined(PERL_DEBUG_READONLY_OPS)
-PERL_CALLCONV void
-Perl_Slab_to_ro(pTHX_ OPSLAB *slab);
-#   define PERL_ARGS_ASSERT_SLAB_TO_RO          \
-        assert(slab)
-
-PERL_CALLCONV void
-Perl_Slab_to_rw(pTHX_ OPSLAB * const slab);
-#   define PERL_ARGS_ASSERT_SLAB_TO_RW          \
-        assert(slab)
-
-# endif /* defined(PERL_DEBUG_READONLY_OPS) */
 # if !defined(PERL_NO_INLINE_FUNCTIONS)
 PERL_STATIC_INLINE bool
 S_should_warn_nl(const char *pv)
@@ -6147,17 +6861,6 @@ Perl_sv_buf_to_ro(pTHX_ SV *sv)
         assert(sv)
 
 #endif
-#if defined(PERL_DEBUG_READONLY_OPS)
-PERL_CALLCONV PADOFFSET
-Perl_op_refcnt_dec(pTHX_ OP *o);
-# define PERL_ARGS_ASSERT_OP_REFCNT_DEC         \
-        assert(o)
-
-PERL_CALLCONV OP *
-Perl_op_refcnt_inc(pTHX_ OP *o);
-# define PERL_ARGS_ASSERT_OP_REFCNT_INC
-
-#endif /* defined(PERL_DEBUG_READONLY_OPS) */
 #if defined(PERL_DEFAULT_DO_EXEC3_IMPLEMENTATION)
 PERL_CALLCONV bool
 Perl_do_exec(pTHX_ const char *cmd)
@@ -6708,6 +7411,11 @@ S_do_trans_simple(pTHX_ SV * const sv, const OPtrans_map * const tbl)
         __attribute__warn_unused_result__;
 # define PERL_ARGS_ASSERT_DO_TRANS_SIMPLE       \
         assert(sv); assert(tbl)
+
+STATIC bool
+S_tr_range_of(pTHX_ const OPtrans_map * const tbl, U8 *lo, U8 *hi, U8 *delta);
+# define PERL_ARGS_ASSERT_TR_RANGE_OF           \
+        assert(tbl); assert(lo); assert(hi); assert(delta)
 
 #endif /* defined(PERL_IN_DOOP_C) */
 #if defined(PERL_IN_DOOP_C)    || defined(PERL_IN_OP_C)        || \
@@ -9559,6 +10267,13 @@ Perl_mem_log_realloc(const UV n, const UV typesize, const char *type_name, Mallo
         assert(type_name); assert(filename); assert(funcname)
 
 #endif /* defined(PERL_MEM_LOG) */
+#if defined(PERL_MT_DEBUG_IMMORTAL)
+PERL_CALLCONV bool
+Perl_mt_check_immortal(const SV *sv);
+# define PERL_ARGS_ASSERT_MT_CHECK_IMMORTAL     \
+        assert(sv)
+
+#endif
 #if !defined(PERL_NO_INLINE_FUNCTIONS)
 PERL_STATIC_INLINE I32 *
 Perl_CvDEPTH(const CV * const sv);
@@ -9569,6 +10284,11 @@ PERL_STATIC_INLINE GV *
 Perl_CvGV(pTHX_ CV *sv);
 # define PERL_ARGS_ASSERT_CVGV                  \
         assert(sv)
+
+PERL_STATIC_INLINE PADLIST **
+Perl_CvPADLISTp(const CV * const cv);
+# define PERL_ARGS_ASSERT_CVPADLISTP            \
+        assert(cv)
 
 PERL_STATIC_INLINE Stack_off_t
 Perl_POPMARK(pTHX);
@@ -9634,17 +10354,22 @@ Perl_SvREFCNT_dec_ret_NULL(pTHX_ SV *sv);
 # define PERL_ARGS_ASSERT_SVREFCNT_DEC_RET_NULL
 
 PERL_STATIC_INLINE SV *
-Perl_SvREFCNT_inc(SV *sv);
+Perl_SvREFCNT_inc(pTHX_ SV *sv);
 # define PERL_ARGS_ASSERT_SVREFCNT_INC
 
 PERL_STATIC_INLINE SV *
-Perl_SvREFCNT_inc_NN(SV *sv);
+Perl_SvREFCNT_inc_NN(pTHX_ SV *sv);
 # define PERL_ARGS_ASSERT_SVREFCNT_INC_NN       \
         assert(sv)
 
 PERL_STATIC_INLINE void
-Perl_SvREFCNT_inc_void(SV *sv);
+Perl_SvREFCNT_inc_void(pTHX_ SV *sv);
 # define PERL_ARGS_ASSERT_SVREFCNT_INC_VOID
+
+PERL_STATIC_INLINE void
+Perl_SvREFCNT_inc_void_NN(pTHX_ SV *sv);
+# define PERL_ARGS_ASSERT_SVREFCNT_INC_VOID_NN  \
+        assert(sv)
 
 PERL_STATIC_INLINE bool
 Perl_SvTRUE(pTHX_ SV *sv);
@@ -10381,6 +11106,11 @@ PERL_STATIC_INLINE AV *
 Perl_cop_file_avn(pTHX_ const COP *cop);
 #   define PERL_ARGS_ASSERT_COP_FILE_AVN        \
         assert(cop)
+
+PERL_STATIC_INLINE REGEXP *
+Perl_mt_pm_getre(pTHX_ const PMOP *o);
+#   define PERL_ARGS_ASSERT_MT_PM_GETRE         \
+        assert(o)
 
 #   if !defined(PERL_IMPLICIT_SYS)
 PERL_STATIC_INLINE bool

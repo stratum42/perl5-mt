@@ -1,0 +1,49 @@
+name: perl5-mt CI
+on:
+  push:
+    branches: [main, "phase-*", "simd"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-amd64:
+    runs-on: linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./Configure -des -Dusethreads -Ud_thread_local -Dprefix="$PWD/inst" -Accflags='-std=gnu17' -Doptimize='-O2 -g'
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: krt unit tests
+        run: test -d krt && make -C krt test || echo "krt not present yet"
+      - name: Core test suite (with the long t/mt cases)
+        env:
+          PERL_MT_LONG_TESTS: "1"
+        run: TEST_JOBS="$(nproc)" make test_harness
+      - name: SIMD parity (dual gate)
+        run: |
+          if [ -f t/mt/simd_parity.t ]; then
+            PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/simd_parity.t
+            PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/simd_parity.t
+          fi
+
+  linux-ppc64le:
+    runs-on: linux-ppc64le
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./Configure -des -Dusethreads -Ud_thread_local -Dprefix="$PWD/inst" -Accflags='-std=gnu17' -Doptimize='-O2 -g'
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: krt unit tests
+        run: test -d krt && make -C krt test || echo "krt not present yet"
+      - name: Core test suite (with the long t/mt cases)
+        env:
+          PERL_MT_LONG_TESTS: "1"
+        run: TEST_JOBS="$(nproc)" make test_harness
+      - name: SIMD parity (dual gate)
+        run: |
+          if [ -f t/mt/simd_parity.t ]; then
+            PERL_FORCE_SCALAR=0 ./perl -I. -Ilib t/mt/simd_parity.t
+            PERL_FORCE_SCALAR=1 ./perl -I. -Ilib t/mt/simd_parity.t
+          fi

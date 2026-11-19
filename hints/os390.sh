@@ -32,8 +32,18 @@ esac
 # Prepend your favorites with Configure -Dccflags=your_favorites
 
 # This overrides the name the compiler was called with.  'ext' is required for
-# "unicode literals" to be enabled
-def_os390_cflags='-qlanglvl=extc1x';
+# "unicode literals" to be enabled.  Support both classic xlc/c99 and xlclang
+# (Open XL C/C++ for z/OS) for perl5-mt C11 atomics.
+case "$cc" in
+    *xlclang*|*ibm-clang*)
+	def_os390_cflags='-std=gnu11'
+	os390_is_clang=true
+	;;
+    *)
+	def_os390_cflags='-qlanglvl=extc1x'
+	os390_is_clang=false
+	;;
+esac
 
 # For #ifdefs in code
 def_os390_defs="-DOS390 -DZOS";
@@ -47,39 +57,58 @@ def_os390_defs="$def_os390_defs -D_ALL_SOURCE";
 
 case "$use64bitall" in
 '')
-  def_os390_cflags="$def_os390_cflags -qxplink"
-  def_os390_cccdlflags="-qxplink"
-  def_os390_ldflags="-qxplink"
+  if test "X$os390_is_clang" = "Xtrue"; then
+    def_os390_cflags="$def_os390_cflags -qxplink"
+    def_os390_cccdlflags="-qxplink"
+    def_os390_ldflags="-qxplink"
+  else
+    def_os390_cflags="$def_os390_cflags -qxplink"
+    def_os390_cccdlflags="-qxplink"
+    def_os390_ldflags="-qxplink"
+  fi
 # defines a BSD-like socket interface for the function prototypes and structures involved (not required with 64-bit)
   def_os390_defs="$def_os390_defs -D_OE_SOCKETS";
   ;;
 *)
-  def_os390_cflags="$def_os390_cflags -Wc,lp64"
-  def_os390_cccdlflags="$def_os390_cflags -Wl,lp64"
-  def_os390_ldflags="-Wl,lp64"
+  if test "X$os390_is_clang" = "Xtrue"; then
+    def_os390_cflags="$def_os390_cflags -m64"
+    def_os390_cccdlflags="$def_os390_cflags -m64"
+    def_os390_ldflags="-m64"
+  else
+    def_os390_cflags="$def_os390_cflags -Wc,lp64"
+    def_os390_cccdlflags="$def_os390_cflags -Wl,lp64"
+    def_os390_ldflags="-Wl,lp64"
+  fi
 esac
 
 myfirstchar=$(od -A n -N 1 -t x $me | xargs | tr [:lower:] [:upper:] | tr -d 0)
 if [ "${myfirstchar}" = "23" ]; then # 23 is '#' in ASCII
   unset ebcdic
-  def_os390_cflags="$def_os390_cflags -qascii"
+  if test "X$os390_is_clang" = "Xtrue"; then
+    def_os390_cflags="$def_os390_cflags -qascii"
+  else
+    def_os390_cflags="$def_os390_cflags -qascii"
+  fi
 else
   ebcdic=true
+  def_os390_defs="$def_os390_defs -DEBCDIC=1"
 fi
 
 # Export all externally defined functions and variables in the compilation
 # unit so that a DLL application can use them.
-def_os390_cflags="$def_os390_cflags -qexportall";
-def_os390_cccdlflags="$def_os390_cccdlflags -qexportall"
+if test "X$os390_is_clang" != "Xtrue"; then
+  def_os390_cflags="$def_os390_cflags -qexportall"
+  def_os390_cccdlflags="$def_os390_cccdlflags -qexportall"
 
-# 3296= #include file not found;
-# 4108= The use of keyword &1 is non-portable
-#       We care about this because it
-#       actually means it didn't do what we expected. e.g.,
-#          INFORMATIONAL CCN4108 ./proto.h:4534 The use of keyword '__attribute__' is non-portable.
-# 3159= Bit field type specified for &1 is not valid. Type &2 assumed.
-#       We do not care about this warning - the bit field is 1 bit and is being specified on something smaller than an int
-def_os390_cflags="$def_os390_cflags -qhaltonmsg=3296:4108 -qsuppress=CCN3159 -qfloat=ieee"
+  # 3296= #include file not found;
+  # 4108= The use of keyword &1 is non-portable
+  #       We care about this because it
+  #       actually means it didn't do what we expected. e.g.,
+  #          INFORMATIONAL CCN4108 ./proto.h:4534 The use of keyword '__attribute__' is non-portable.
+  # 3159= Bit field type specified for &1 is not valid. Type &2 assumed.
+  #       We do not care about this warning - the bit field is 1 bit and is being specified on something smaller than an int
+  def_os390_cflags="$def_os390_cflags -qhaltonmsg=3296:4108 -qsuppress=CCN3159 -qfloat=ieee"
+fi
 
 def_os390_defs="$def_os390_defs -DMAXSIG=39 -DNSIG=39";     # maximum signal number; not furnished by IBM
 def_os390_defs="$def_os390_defs -DOEMVS";   # is used in place of #ifdef __MVS__

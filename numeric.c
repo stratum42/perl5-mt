@@ -25,6 +25,8 @@ values, including such things as replacements for the OS's atof() function
 #include "EXTERN.h"
 #define PERL_IN_NUMERIC_C
 #include "perl.h"
+#include "core-math/mt_nan.h"
+#include "core-math/mt_parse_nv.h"
 
 #ifdef Perl_strtod
 
@@ -1551,7 +1553,7 @@ S_my_atof_infnan(pTHX_ const char* s, bool negative, const char* send, NV* value
 #endif
 #ifdef NV_NAN
         if ((infnan & IS_NUMBER_NAN)) {
-            *value = NV_NAN;
+            *value = mt_canon_nv(NV_NAN);
             return (char*)p;
         }
 #endif
@@ -1658,6 +1660,62 @@ Perl_my_atof3(pTHX_ const char* orig, NV* value, const STRLEN len)
         char* endp;
         if ((endp = S_my_atof_infnan(aTHX_ s, FALSE, send, value)))
             return endp;
+    }
+#  endif
+
+#  if MT_NV_IS_BINARY64
+    /* Deterministic correctly-rounded Eisel-Lemire + exact fallback parser
+     * for IEEE-754 binary64 when using the standard '.' radix (both in Perl's
+     * locale state and in the active thread C LC_NUMERIC locale). */
+    {
+        bool use_mt_parse = TRUE;
+#    ifdef USE_LOCALE_NUMERIC
+        if (NOT_IN_NUMERIC_STANDARD_) {
+            use_mt_parse = FALSE;
+        }
+#      if defined(USE_POSIX_2008_LOCALE)
+        else {
+            const locale_t cur_obj = uselocale((locale_t) 0);
+            if (LIKELY(cur_obj != (locale_t) 0 && cur_obj == PL_C_locale_obj)) {
+                /* Standard C locale object: radix is guaranteed '.'. */
+            }
+            else if (UNLIKELY(cur_obj == (locale_t) 0
+                              || cur_obj == LC_GLOBAL_LOCALE)) {
+                /* Global locale (e.g. XS called uselocale(LC_GLOBAL_LOCALE)):
+                 * avoid calling localeconv() or nl_langinfo_l() on
+                 * LC_GLOBAL_LOCALE; let Perl_strtod handle it. */
+                use_mt_parse = FALSE;
+            }
+            else {
+#        if defined(HAS_NL_LANGINFO_L) && defined(RADIXCHAR)
+                const char *dp = nl_langinfo_l(RADIXCHAR, cur_obj);
+                if (!dp || dp[0] != '.' || dp[1] != '\0')
+                    use_mt_parse = FALSE;
+#        else
+                use_mt_parse = FALSE;
+#        endif
+            }
+        }
+#      else
+        else {
+            const struct lconv *lc = localeconv();
+            if (!lc || !lc->decimal_point
+                || lc->decimal_point[0] != '.'
+                || lc->decimal_point[1] != '\0') {
+                use_mt_parse = FALSE;
+            }
+        }
+#      endif
+#    endif
+        if (use_mt_parse) {
+            double dval = 0.0;
+            const char *endp = NULL;
+            if (mt_parse_double(s, send, &dval, &endp)) {
+                *value = mt_canon_nv((NV)dval);
+                return (char *)endp;
+            }
+            return NULL;
+        }
     }
 #  endif
 

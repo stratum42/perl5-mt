@@ -19,6 +19,408 @@
 #define PERL_IN_AV_C
 #include "perl.h"
 
+/* ---- Packed arrays ------------------------------------------------------ */
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+static _Thread_local SV *mt_av_scratch_sv = NULL;
+#else
+static __thread SV *mt_av_scratch_sv = NULL;
+#endif
+
+static UV mt_av_unpack_counter = 0;
+
+UV
+Perl_av_unpack_count(void)
+{
+    return __atomic_load_n(&mt_av_unpack_counter, __ATOMIC_RELAXED);
+}
+
+static inline size_t
+S_av_packed_elem_size(U8 ptype)
+{
+    switch (ptype) {
+    case AV_PACKED_IV: return sizeof(IV);
+    case AV_PACKED_NV: return sizeof(NV);
+    case AV_PACKED_U8: return sizeof(U8);
+    default:           return sizeof(IV);
+    }
+}
+
+static inline bool
+S_av_packed_val_fits(AV *av, SV *val, bool ignore_magic)
+{
+    U8 ptype;
+    U32 flags;
+    if (!val)
+        return FALSE;
+    flags = SvFLAGS(val);
+    if (flags & (SVf_ROK | SVs_OBJECT))
+        return FALSE;
+    if (!ignore_magic && (flags & (SVs_GMG | SVs_RMG)))
+        return FALSE;
+    ptype = AvPACKED_TYPE(av);
+    if (ptype == AV_PACKED_IV) {
+        if ((flags & (SVf_IOK | SVf_NOK | SVf_POK)) != SVf_IOK)
+            return FALSE;
+        if (SvIsUV(val) && SvUVX(val) > (UV)IV_MAX)
+            return FALSE;
+        return TRUE;
+    }
+    if (ptype == AV_PACKED_NV) {
+        if (flags & SVf_POK)
+            return FALSE;
+        if (flags & SVf_NOK)
+            return TRUE;
+        if (flags & SVf_IOK) {
+            if (SvIsUV(val)) {
+                UV u = SvUVX(val);
+                NV d = (NV)u;
+                return (d >= 0.0 && d < 18446744073709551616.0 && (UV)d == u);
+            } else {
+                IV v = SvIVX(val);
+                NV d = (NV)v;
+                return ((IV)d == v);
+            }
+        }
+        return FALSE;
+    }
+    if (ptype == AV_PACKED_U8) {
+        if ((flags & (SVf_IOK | SVf_NOK | SVf_POK)) != SVf_IOK)
+            return FALSE;
+        if (SvIsUV(val))
+            return SvUVX(val) <= 255;
+        return (SvIVX(val) >= 0 && SvIVX(val) <= 255);
+    }
+    return FALSE;
+}
+
+static inline void
+S_av_packed_write(AV *av, SSize_t key, SV *val)
+{
+    U8 ptype = AvPACKED_TYPE(av);
+    void *data = AvPACKED_DATA(av);
+    if (ptype == AV_PACKED_IV) {
+        ((IV *)data)[key] = SvIsUV(val) ? (IV)SvUVX(val) : SvIVX(val);
+    } else if (ptype == AV_PACKED_NV) {
+        if (SvFLAGS(val) & SVf_NOK)
+            ((NV *)data)[key] = SvNVX(val);
+        else if (SvIsUV(val))
+            ((NV *)data)[key] = (NV)SvUVX(val);
+        else
+            ((NV *)data)[key] = (NV)SvIVX(val);
+    } else {
+        ((U8 *)data)[key] = (U8)(SvIsUV(val) ? SvUVX(val) : (UV)SvIVX(val));
+    }
+}
+
+static inline SV *
+S_av_packed_box(pTHX_ AV *av, SSize_t key)
+{
+    U8 ptype = AvPACKED_TYPE(av);
+    void *data = AvPACKED_DATA(av);
+    if (ptype == AV_PACKED_IV)
+        return newSViv(((IV *)data)[key]);
+    if (ptype == AV_PACKED_NV)
+        return newSVnv(((NV *)data)[key]);
+    return newSViv((IV)((U8 *)data)[key]);
+}
+
+static void
+S_av_packed_extend(pTHX_ AV *av, SSize_t key)
+{
+    U8 ptype;
+    size_t esz;
+    SSize_t newmax;
+    void *data;
+
+    if (key < -1)
+        Perl_croak(aTHX_ "panic: av_extend_guts() negative count (%" IVdf ")", (IV)key);
+    if (key <= AvMAX(av))
+        return;
+
+    ptype = AvPACKED_TYPE(av);
+    esz = S_av_packed_elem_size(ptype);
+    data = AvPACKED_DATA(av);
+    if (data) {
+        newmax = AvMAX(av) / 2;
+        if (newmax < 8)
+            newmax = 8;
+        newmax = (key > SSize_t_MAX - newmax) ? SSize_t_MAX : key + newmax;
+        Renewc(data, (Size_t)(newmax + 1) * esz, char, void);
+    } else {
+        newmax = key < 3 ? 3 : key;
+        Newx(data, (Size_t)(newmax + 1) * esz, char);
+    }
+    AvALLOC_raw(av) = (SV **)data;
+    AvMAX(av) = newmax;
+}
+
+void
+Perl_av_unpack(pTHX_ AV *av)
+{
+    U8 ptype;
+    void *data;
+    SSize_t fill;
+    SV **ary = NULL;
+    SSize_t newmax = -1;
+    SSize_t i;
+
+    if (!(SvFLAGS(av) & SVf_PACKED_AV))
+        return;
+
+    ptype = AvPACKED_TYPE(av);
+    data  = AvPACKED_DATA(av);
+    fill  = AvFILLp(av);
+
+    if (fill >= 0) {
+        newmax = fill;
+        Newx(ary, newmax + 1, SV *);
+        if (ptype == AV_PACKED_IV) {
+            IV *p = (IV *)data;
+            for (i = 0; i <= fill; i++)
+                ary[i] = newSViv(p[i]);
+        } else if (ptype == AV_PACKED_NV) {
+            NV *p = (NV *)data;
+            for (i = 0; i <= fill; i++)
+                ary[i] = newSVnv(p[i]);
+        } else {
+            U8 *p = (U8 *)data;
+            for (i = 0; i <= fill; i++)
+                ary[i] = newSViv((IV)p[i]);
+        }
+    }
+
+    Safefree(data);
+    SvFLAGS(av) &= ~SVf_PACKED_AV;
+    AvALLOC_raw(av) = ary;
+    AvARRAY_raw(av) = ary;
+    AvMAX(av) = newmax;
+    AvFILLp(av) = fill;
+    AvREAL_on(av);
+
+    if (SvREFCNT(av) > 0)
+        __atomic_fetch_add(&mt_av_unpack_counter, 1, __ATOMIC_RELAXED);
+}
+
+SV ***
+Perl_av_unpack_array_ptr_nocontext(AV *av)
+{
+    dTHX;
+    Perl_av_unpack(aTHX_ av);
+    return &av->sv_u.svu_array;
+}
+
+SV ***
+Perl_av_unpack_alloc_ptr_nocontext(AV *av)
+{
+    if (SvREFCNT(av) == 0 && AvFILLp(av) < 0) {
+        SvFLAGS(av) &= ~SVf_PACKED_AV;
+        AvARRAY_raw(av) = NULL;
+        return &((XPVAV *)SvANY(av))->xav_alloc;
+    }
+    {
+        dTHX;
+        Perl_av_unpack(aTHX_ av);
+        return &((XPVAV *)SvANY(av))->xav_alloc;
+    }
+}
+
+SV **
+Perl_av_array(pTHX_ AV *av)
+{
+    PERL_UNUSED_CONTEXT;
+    return AvARRAY(av);
+}
+
+AV *
+Perl_av_new_packed(pTHX_ U8 ptype, SSize_t cap)
+{
+    AV *av = newAV();
+    if (cap > 0) {
+        size_t esz = S_av_packed_elem_size(ptype);
+        void *data;
+        Newx(data, (Size_t)cap * esz, char);
+        AvALLOC_raw(av) = (SV **)data;
+        AvMAX(av) = cap - 1;
+    } else {
+        AvALLOC_raw(av) = NULL;
+        AvMAX(av) = -1;
+    }
+    AvARRAY_raw(av) = (SV **)(uintptr_t)ptype;
+    AvFILLp(av) = -1;
+    SvFLAGS(av) |= SVf_PACKED_AV;
+    return av;
+}
+
+bool
+Perl_av_pack(pTHX_ AV *av, U8 ptype)
+{
+    SSize_t fill, i;
+    SV **ary;
+    void *data = NULL;
+    size_t esz;
+
+    if (!av || SvTYPE(av) != SVt_PVAV || SvRMAGICAL(av) || SvREADONLY(av))
+        return FALSE;
+    if (ptype != AV_PACKED_IV && ptype != AV_PACKED_NV && ptype != AV_PACKED_U8)
+        return FALSE;
+
+    if (SvFLAGS(av) & SVf_PACKED_AV) {
+        if (AvPACKED_TYPE(av) == ptype)
+            return TRUE;
+        Perl_av_unpack(aTHX_ av);
+    }
+
+    if (!AvREAL(av))
+        av_reify(av);
+
+    fill = AvFILLp(av);
+    ary  = AvARRAY_raw(av);
+
+    /* Validate all elements fit before mutating av */
+    for (i = 0; i <= fill; i++) {
+        SV *sv = ary ? ary[i] : NULL;
+        if (!sv)
+            return FALSE;
+        U32 flags = SvFLAGS(sv);
+        if (flags & (SVf_ROK | SVs_OBJECT | SVs_GMG | SVs_RMG))
+            return FALSE;
+        if (ptype == AV_PACKED_IV) {
+            if ((flags & (SVf_IOK | SVf_NOK | SVf_POK)) != SVf_IOK)
+                return FALSE;
+            if (SvIsUV(sv) && SvUVX(sv) > (UV)IV_MAX)
+                return FALSE;
+        } else if (ptype == AV_PACKED_NV) {
+            if (flags & SVf_POK)
+                return FALSE;
+            if (flags & SVf_NOK)
+                continue;
+            if (flags & SVf_IOK) {
+                if (SvIsUV(sv)) {
+                    UV u = SvUVX(sv);
+                    NV d = (NV)u;
+                    if (!(d >= 0.0 && d < 18446744073709551616.0 && (UV)d == u))
+                        return FALSE;
+                } else {
+                    IV v = SvIVX(sv);
+                    NV d = (NV)v;
+                    if ((IV)d != v)
+                        return FALSE;
+                }
+            } else {
+                return FALSE;
+            }
+        } else {
+            if ((flags & (SVf_IOK | SVf_NOK | SVf_POK)) != SVf_IOK)
+                return FALSE;
+            if (SvIsUV(sv)) {
+                if (SvUVX(sv) > 255) return FALSE;
+            } else {
+                if (SvIVX(sv) < 0 || SvIVX(sv) > 255) return FALSE;
+            }
+        }
+    }
+
+    esz = S_av_packed_elem_size(ptype);
+    if (fill >= 0) {
+        Newx(data, (Size_t)(fill + 1) * esz, char);
+        if (ptype == AV_PACKED_IV) {
+            IV *p = (IV *)data;
+            for (i = 0; i <= fill; i++)
+                p[i] = SvIsUV(ary[i]) ? (IV)SvUVX(ary[i]) : SvIVX(ary[i]);
+        } else if (ptype == AV_PACKED_NV) {
+            NV *p = (NV *)data;
+            for (i = 0; i <= fill; i++) {
+                SV *sv = ary[i];
+                if (SvFLAGS(sv) & SVf_NOK)
+                    p[i] = SvNVX(sv);
+                else if (SvIsUV(sv))
+                    p[i] = (NV)SvUVX(sv);
+                else
+                    p[i] = (NV)SvIVX(sv);
+            }
+        } else {
+            U8 *p = (U8 *)data;
+            for (i = 0; i <= fill; i++)
+                p[i] = (U8)(SvIsUV(ary[i]) ? SvUVX(ary[i]) : (UV)SvIVX(ary[i]));
+        }
+        for (i = 0; i <= fill; i++)
+            SvREFCNT_dec(ary[i]);
+    }
+
+    Safefree(AvALLOC_raw(av));
+    AvALLOC_raw(av) = (SV **)data;
+    AvARRAY_raw(av) = (SV **)(uintptr_t)ptype;
+    AvMAX(av) = fill;
+    AvFILLp(av) = fill;
+    SvFLAGS(av) |= SVf_PACKED_AV;
+    return TRUE;
+}
+
+static int
+S_packed_elem_get(pTHX_ SV *sv, MAGIC *mg)
+{
+    AV *av = (AV *)mg->mg_obj;
+    SSize_t key = (SSize_t)(intptr_t)mg->mg_ptr;
+    if (SvFLAGS(av) & SVf_PACKED_AV) {
+        if (key >= 0 && key <= AvFILLp(av)) {
+            U8 ptype = AvPACKED_TYPE(av);
+            void *data = AvPACKED_DATA(av);
+            if (ptype == AV_PACKED_IV)
+                sv_setiv(sv, ((IV *)data)[key]);
+            else if (ptype == AV_PACKED_NV)
+                sv_setnv(sv, ((NV *)data)[key]);
+            else
+                sv_setiv(sv, (IV)((U8 *)data)[key]);
+        } else {
+            sv_setsv(sv, &PL_sv_undef);
+        }
+    } else {
+        SV **svp = av_fetch(av, key, 0);
+        sv_setsv(sv, svp ? *svp : &PL_sv_undef);
+    }
+    return 0;
+}
+
+static int
+S_packed_elem_set(pTHX_ SV *sv, MAGIC *mg)
+{
+    AV *av = (AV *)mg->mg_obj;
+    SSize_t key = (SSize_t)(intptr_t)mg->mg_ptr;
+    if (SvREADONLY(av) && key >= AvFILLp(av))
+        Perl_croak_no_modify();
+    if (SvFLAGS(av) & SVf_PACKED_AV) {
+        if (key >= 0 && key <= AvFILLp(av) + 1
+            && S_av_packed_val_fits(av, sv, TRUE))
+        {
+            if (key > AvMAX(av))
+                S_av_packed_extend(aTHX_ av, key);
+            S_av_packed_write(av, key, sv);
+            if (key > AvFILLp(av))
+                AvFILLp(av) = key;
+            return 0;
+        }
+        Perl_av_unpack(aTHX_ av);
+    }
+    {
+        SV *copy = newSVsv(sv);
+        if (!av_store(av, key, copy))
+            SvREFCNT_dec(copy);
+    }
+    return 0;
+}
+
+static const MGVTBL mt_packed_av_vtbl = {
+    S_packed_elem_get,
+    S_packed_elem_set,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+};
+
 void
 Perl_av_reify(pTHX_ AV *av)
 {
@@ -85,6 +487,10 @@ Perl_av_extend(pTHX_ AV *av, SSize_t key)
         sv_setiv(arg1, (IV)(key + 1));
         Perl_magic_methcall(aTHX_ MUTABLE_SV(av), mg, SV_CONST(EXTEND), G_DISCARD, 1,
                             arg1);
+        return;
+    }
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        S_av_packed_extend(aTHX_ av, key);
         return;
     }
     av_extend_guts(av,key,&AvMAX(av),&AvALLOC(av),&AvARRAY(av));
@@ -298,6 +704,37 @@ Perl_av_fetch(pTHX_ AV *av, SSize_t key, I32 lval)
     size = AvFILLp(av) + 1;
     key += neg * size; /* handle negative index without using branch */
 
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        if (!lval) {
+            if ((Size_t)key >= (Size_t)size)
+                return NULL;
+            mt_av_scratch_sv = sv_2mortal(S_av_packed_box(aTHX_ av, key));
+            return &mt_av_scratch_sv;
+        }
+        if (key < 0)
+            return NULL;
+        if (SvREADONLY(av) && key >= AvFILLp(av))
+            Perl_croak_no_modify();
+        if (key > size
+            || (PL_op && (PL_op->op_type == OP_AELEM
+                          || PL_op->op_type == OP_MULTIDEREF)
+                && (PL_op->op_private & OPpLVAL_INTRO)))
+        {
+            /* Creating undef holes or localizing an element requires unpacking. */
+            Perl_av_unpack(aTHX_ av);
+        } else {
+            SV *sv = newSV_type_mortal(SVt_PVLV);
+            MAGIC *mg = sv_magicext(sv, MUTABLE_SV(av), PERL_MAGIC_ext,
+                                    &mt_packed_av_vtbl, NULL, 0);
+            mg->mg_ptr = (char *)(intptr_t)key;
+            mg->mg_flags |= MGf_REFCOUNTED;
+            SvREFCNT_inc_simple_void_NN(av);
+            LvTYPE(sv) = 't';
+            LvTARG(sv) = sv;
+            return &(LvTARG(sv));
+        }
+    }
+
     /* the cast from SSize_t to Size_t allows both (key < 0) and (key >= size)
      * to be tested as a single condition */
     if ((Size_t)key >= (Size_t)size) {
@@ -371,6 +808,22 @@ Perl_av_store(pTHX_ AV *av, SSize_t key, SV *val)
 
     if (SvREADONLY(av) && key >= AvFILL(av))
         Perl_croak_no_modify();
+
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        if (!SvSMAGICAL(av) && key <= AvFILLp(av) + 1
+            && S_av_packed_val_fits(av, val, FALSE))
+        {
+            if (key > AvMAX(av))
+                S_av_packed_extend(aTHX_ av, key);
+            S_av_packed_write(av, key, val);
+            if (key > AvFILLp(av))
+                AvFILLp(av) = key;
+            SvREFCNT_dec(val);
+            mt_av_scratch_sv = sv_2mortal(S_av_packed_box(aTHX_ av, key));
+            return &mt_av_scratch_sv;
+        }
+        Perl_av_unpack(aTHX_ av);
+    }
 
     if (!AvREAL(av) && AvREIFY(av))
         av_reify(av);
@@ -660,6 +1113,11 @@ Perl_av_clear(pTHX_ AV *av)
     if (AvMAX(av) < 0)
         return;
 
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        AvFILLp(av) = -1;
+        return;
+    }
+
     if ((real = cBOOL(AvREAL(av)))) {
         SV** const ary = AvARRAY(av);
         SSize_t index = AvFILLp(av) + 1;
@@ -716,6 +1174,16 @@ Perl_av_undef(pTHX_ AV *av)
     /* Give any tie a chance to cleanup first */
     if (SvTIED_mg((const SV *)av, PERL_MAGIC_tied)) 
         av_fill(av, -1);
+
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        Safefree(AvALLOC_raw(av));
+        AvALLOC_raw(av) = NULL;
+        AvARRAY_raw(av) = NULL;
+        AvMAX(av) = AvFILLp(av) = -1;
+        SvFLAGS(av) &= ~SVf_PACKED_AV;
+        if (SvRMAGICAL(av)) mg_clear(MUTABLE_SV(av));
+        return;
+    }
 
     real = cBOOL(AvREAL(av));
     if (real) {
@@ -827,6 +1295,12 @@ Perl_av_pop(pTHX_ AV *av)
     }
     if (AvFILL(av) < 0)
         return &PL_sv_undef;
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        retval = S_av_packed_box(aTHX_ av, AvFILLp(av)--);
+        if (SvSMAGICAL(av))
+            mg_set(MUTABLE_SV(av));
+        return retval;
+    }
     retval = AvARRAY(av)[AvFILLp(av)];
     AvARRAY(av)[AvFILLp(av)--] = NULL;
     if (SvSMAGICAL(av))
@@ -953,6 +1427,19 @@ Perl_av_shift(pTHX_ AV *av)
     }
     if (AvFILL(av) < 0)
       return &PL_sv_undef;
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        SSize_t fill = AvFILLp(av);
+        U8 ptype = AvPACKED_TYPE(av);
+        char *data = (char *)AvPACKED_DATA(av);
+        size_t esz = S_av_packed_elem_size(ptype);
+        retval = S_av_packed_box(aTHX_ av, 0);
+        if (fill > 0)
+            Move(data + esz, data, (Size_t)fill * esz, char);
+        AvFILLp(av) = fill - 1;
+        if (SvSMAGICAL(av))
+            mg_set(MUTABLE_SV(av));
+        return retval;
+    }
     retval = *AvARRAY(av);
 #ifndef PERL_RC_STACK
     if (AvREAL(av))
@@ -1031,6 +1518,15 @@ Perl_av_fill(pTHX_ AV *av, SSize_t fill)
                             1, arg1);
         return;
     }
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        if (fill <= AvFILLp(av)) {
+            AvFILLp(av) = fill;
+            if (SvSMAGICAL(av))
+                mg_set(MUTABLE_SV(av));
+            return;
+        }
+        Perl_av_unpack(aTHX_ av);
+    }
     if (fill <= AvMAX(av)) {
         SSize_t key = AvFILLp(av);
         SV** const ary = AvARRAY(av);
@@ -1108,7 +1604,21 @@ Perl_av_delete(pTHX_ AV *av, SSize_t key, I32 flags)
 
     if (key > AvFILLp(av))
         return NULL;
-    else {
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV)) {
+        if (key == AvFILLp(av)) {
+            sv = S_av_packed_box(aTHX_ av, key);
+            AvFILLp(av)--;
+            if (SvSMAGICAL(av))
+                mg_set(MUTABLE_SV(av));
+            if (flags & G_DISCARD) {
+                SvREFCNT_dec_NN(sv);
+                return NULL;
+            }
+            return sv_2mortal(sv);
+        }
+        Perl_av_unpack(aTHX_ av);
+    }
+    {
         if (!AvREAL(av) && AvREIFY(av))
             av_reify(av);
         sv = AvARRAY(av)[key];
@@ -1189,6 +1699,8 @@ Perl_av_exists(pTHX_ AV *av, SSize_t key)
         if (key < 0)
             return FALSE;
     }
+    if (UNLIKELY(SvFLAGS(av) & SVf_PACKED_AV))
+        return (key <= AvFILLp(av)) ? TRUE : FALSE;
 
     if (key <= AvFILLp(av) && AvARRAY(av)[key])
     {

@@ -1427,6 +1427,9 @@ our %Modules = (
                 ext/XS-Typemap/
                 ext/attributes/
                 ext/mro/
+                ext/MT-XSTest/
+                ext/MT/
+                ext/MT-XSTest-Legacy/
                 ext/re/
                 lib/AnyDBM_File.{pm,t}
                 lib/Benchmark.{pm,t}

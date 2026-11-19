@@ -71,3 +71,7 @@ Porting/valgrindpp.pl
 Cross/generate_config_sh
 Cross/warp
 dist/Thread-Semaphore/examples/semaphore.pl
+tools/ci-macos.sh
+tools/cpan-fixtures.sh
+tools/mt-xs-latency.pl
+tools/simd-bench.pl

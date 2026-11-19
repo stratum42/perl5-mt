@@ -75,14 +75,28 @@ Perl__force_out_malformed_utf8_message(pTHX_
     SAVESPTR(PL_curcop);
 
     PL_dowarn = G_WARN_ALL_ON|G_WARN_ON;
-    if (PL_curcop) {
-        SAVECURCOPWARNINGS();
-        PL_curcop->cop_warnings = pWARN_ALL;
+    {
+        COP forced;
+        if (PL_curcop) {
+            if (PL_curcop->op_slabbed && OpSLAB(PL_curcop)->opslab_readonly) {
+                /* perl5-mt: the COP is in the sealed boot image and cannot
+                 * be written; run with a copy of it (PL_curcop is restored
+                 * by the LEAVE below) */
+                forced = *PL_curcop;
+                forced.cop_warnings = pWARN_ALL;
+                PL_curcop = &forced;
+            }
+            else {
+                SAVECURCOPWARNINGS();
+                PL_curcop->cop_warnings = pWARN_ALL;
+            }
+        }
+
+        (void) utf8n_to_uvchr_error(p, e - p, NULL, flags & ~UTF8_CHECK_ONLY,
+                                    &errors);
+
+        LEAVE;
     }
-
-    (void) utf8n_to_uvchr_error(p, e - p, NULL, flags & ~UTF8_CHECK_ONLY, &errors);
-
-    LEAVE;
 
     if (! errors) {
         Perl_croak(aTHX_ "panic: _force_out_malformed_utf8_message should"
@@ -2201,6 +2215,19 @@ Perl_utf8_length(pTHX_ const U8 * const s0, const U8 * const e)
 #endif
 
     {
+#ifndef EBCDIC
+
+        /* perl5-mt: each byte of an ASCII run is one character, so
+         * the SIMD scan skips the leading run in one step */
+        if (PERL_SIMD_ON() && e - s >= PERL_SIMD_MIN_LEN) {
+            const STRLEN n = PERL_SIMD_DISPATCH(perl_simd_ascii_span, s,
+                                                (STRLEN) (e - s));
+            s += n;
+            len += n;
+        }
+
+#endif
+
         while (s < e) { /* Count characters directly */
 
             /* Take extra care to not exceed 'e' (which would be undefined
@@ -2255,6 +2282,27 @@ Perl_utf8_length(pTHX_ const U8 * const s0, const U8 * const e)
     /* Adjust back down any overshoot */
     continuations -= s - partial_word_end;
     s = partial_word_end;
+
+    /* perl5-mt: whole aligned words of ASCII contribute no
+     * continuations, so the SIMD scan skips them.  The skip stays word-aligned
+     * (the counting below then sees the same words as upstream), and leaves at
+     * least one word before e_limit for the do-loop, which reads a word before
+     * it tests the bound. */
+    if (PERL_SIMD_ON()) {
+        const STRLEN room = e_limit - s;
+
+        if (room >= 2 * PERL_WORDSIZE) {
+            const STRLEN n = PERL_SIMD_DISPATCH(perl_simd_ascii_span, s, room);
+            STRLEN skip = n & ~((STRLEN) PERL_WORDSIZE - 1);
+            const STRLEN max_skip = room - PERL_WORDSIZE;
+
+            if (skip > max_skip) {
+                skip = max_skip & ~((STRLEN) PERL_WORDSIZE - 1);
+            }
+
+            s += skip;
+        }
+    }
 
     do { /* Process per-word */
 

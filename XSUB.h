@@ -153,6 +153,55 @@ is a lexical C<$_> in scope.
 #  define XS_INTERNAL(name) STATIC XSPROTO(name)
 #endif
 
+/*
+=for apidoc Amnh||PERL_XS_THREADSAFE
+
+perl5-mt: a module compiled with C<-DPERL_XS_THREADSAFE=1> declares that its
+XSUBs may be called in-process by every worker interpreter at once.
+C<XS_EXTERNAL(name)> then also emits an exported marker object
+C<mt_threadsafe_E<lt>nameE<gt>> (so C<boot_Foo__Bar> is accompanied by
+C<mt_threadsafe_boot_Foo__Bar>), which C<DynaLoader> looks up next to the
+boot symbol: a module that has it is loaded in-process and its XSUBs are
+stamped C<CVf_MT_THREADSAFE>; a module without it is loaded into an XS
+compartment while workers are active.  Such a module must also define
+C<PERL_NO_GET_CONTEXT> (every XSUB then receives the calling worker's
+interpreter as C<aTHX> instead of fetching it, and the module cannot rely on
+a process-wide interpreter); the header refuses to compile otherwise.  The
+marker is a C tentative definition, so a prototype and a definition of the
+same XSUB in one translation unit are fine; C++ modules cannot use it.
+
+=cut
+*/
+#if defined(PERL_XS_THREADSAFE) && !defined(PERL_CORE)
+#  if defined(MULTIPLICITY) && !defined(PERL_NO_GET_CONTEXT)
+#    error "perl5-mt: PERL_XS_THREADSAFE requires PERL_NO_GET_CONTEXT (define it before including perl.h)"
+#  endif
+#  if defined(__cplusplus)
+#    error "perl5-mt: PERL_XS_THREADSAFE markers are not available to C++ XS modules"
+#  endif
+#  undef XS_EXTERNAL
+#  if defined(__GNUC__)
+     /* the prototype and the definition both emit the tentative
+      * definition, which is C but not C++: keep -Wc++-compat quiet */
+#    define PERL_MT_XS_MARKER(name)                                         \
+        _Pragma("GCC diagnostic push")                                      \
+        _Pragma("GCC diagnostic ignored \"-Wc++-compat\"")                  \
+        int mt_threadsafe_##name;                                           \
+        _Pragma("GCC diagnostic pop")
+#  else
+#    define PERL_MT_XS_MARKER(name) int mt_threadsafe_##name;
+#  endif
+#  if defined(__CYGWIN__) && defined(USE_DYNAMIC_LOADING)
+#    define XS_EXTERNAL(name) __declspec(dllexport) PERL_MT_XS_MARKER(name) \
+                              __declspec(dllexport) XSPROTO(name)
+#  elif defined(HASATTRIBUTE_UNUSED)
+#    define XS_EXTERNAL(name) PERL_MT_XS_MARKER(name) \
+                              void name(pTHX_ CV* cv __attribute__unused__)
+#  else
+#    define XS_EXTERNAL(name) PERL_MT_XS_MARKER(name) XSPROTO(name)
+#  endif
+#endif
+
 /* We do export xsub symbols by default for the public XS macro.
  * Try explicitly using XS_INTERNAL/XS_EXTERNAL instead, please. */
 #define XS(name) XS_EXTERNAL(name)

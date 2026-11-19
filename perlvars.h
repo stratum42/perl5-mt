@@ -45,6 +45,53 @@ PERLVARI(G, curinterp,	PerlInterpreter *, NULL)
 PERLVAR(G, thr_key,	perl_key)	/* key to retrieve per-thread struct */
 #endif
 
+/* perl5-mt: the four immortal SVs (PL_sv_yes, PL_sv_undef, PL_sv_no,
+ * PL_sv_zero, in that order so that SvIMMORTAL_INTERP() keeps working) are
+ * process globals shared by every interpreter in the process.  Their bodies
+ * are static too, so no interpreter's body arena is ever referenced by them
+ * and perl_destruct() never has to tear them down.  Perl_init_constants()
+ * initialises them exactly once per process (PL_sv_immortals_init). */
+PERLVARA(G, sv_immortals, 4, SV)
+PERLVARA(G, sv_immortal_bodies, 3, XPVNV)
+PERLVARI(G, sv_immortals_init, int, 0)
+
+/* perl5-mt: the boot image, once perl_freeze_boot_image() has built it */
+PERLVARI(G, mt_image, struct perl_mt_image *, NULL)
+
+/* perl5-mt: the freeze arena (mt_freeze.c).  While PL_mt_arena_mode is set
+ * every Perl_safesys* allocation is a bump allocation from the arena
+ * (frees are no-ops there), so that the clone that becomes the image
+ * lands in sealable memory; PL_mt_ops_in_arena routes op slabs there from
+ * the start of the process (PERL_MT_IMAGE=1), PL_mt_auto_freeze freezes
+ * after the INIT blocks.  PL_mt_image_key is the protection key that
+ * seals the arena where the OS has them (Linux pkeys); every thread arms
+ * it NOWRITE and re-arms at each JMPENV_PUSH landing. */
+PERLVAR(G, mt_arena, perl_krt_shm_t)
+PERLVARI(G, mt_arena_mode, int, 0)
+PERLVARI(G, mt_arena_exclude, PerlInterpreter *, NULL) /* ... except for this
+                                           interpreter (the parent, which
+                                           perl_clone still runs code in) */
+PERLVARI(G, mt_arena_used, size_t, 0)
+PERLVARI(G, mt_arena_overflow, size_t, 0)
+PERLVARI(G, mt_ops_in_arena, int, 0)
+PERLVARI(G, mt_auto_freeze, int, 0)
+PERLVARI(G, mt_image_key, int, -1)
+PERLVARI(G, mt_image_key_armed, int, 0)
+
+/* perl5-mt: the capability table (mt_cap.c), created on first use */
+PERLVARI(G, mt_caps, struct perl_mt_cap_table *, NULL)
+
+/* perl5-mt: the XS modules the main interpreter booted before the freeze
+ * that allocated MY_CXT state (my_cxt_init); the freeze refuses any of them
+ * that has no CLONE method (MT_MY_CXT_WITHOUT_CLONE) */
+PERLVARI(G, mt_my_cxt_pkgs, char **, NULL)
+PERLVARI(G, mt_my_cxt_npkgs, U32, 0)
+
+/* perl5-mt: the SIMD level the host offers (PERL_SIMD_* in
+ * simd/perl_simd_dispatch.h), set once by Perl_simd_detect from perl_construct;
+ * scalar until then, so a hook that runs earlier takes the upstream path */
+PERLVARI(G, simd_level, U8, 0)
+
 /* XXX does anyone even use this? */
 PERLVARI(G, do_undump,	bool,	FALSE)	/* -u or dump seen? */
 

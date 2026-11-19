@@ -29,6 +29,7 @@
 	{ PERL_MAGIC_nkeys,          "nkeys(k)" },
 	{ PERL_MAGIC_dbfile,         "dbfile(L)" },
 	{ PERL_MAGIC_dbline,         "dbline(l)" },
+	{ PERL_MAGIC_mt_cap,         "mt_cap(M)" },
 	{ PERL_MAGIC_shared,         "shared(N)" },
 	{ PERL_MAGIC_shared_scalar,  "shared_scalar(n)" },
 	{ PERL_MAGIC_collxfrm,       "collxfrm(o)" },

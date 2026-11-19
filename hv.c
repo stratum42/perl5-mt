@@ -34,6 +34,16 @@ holds the key and hash value.
 #define PERL_HASH_INTERNAL_ACCESS
 #include "perl.h"
 
+#if !defined(PERL_FORCE_SCALAR)
+#  if defined(__aarch64__)
+#    include <arm_neon.h>
+#  elif defined(__SSE2__)
+#    include <emmintrin.h>
+#  elif defined(__ALTIVEC__)
+#    include <altivec.h>
+#  endif
+#endif
+
 /* we split when we collide and we have a load factor over 0.667.
  * NOTE if you change this formula so we split earlier than previously
  * you MUST change the logic in hv_ksplit()
@@ -176,6 +186,503 @@ S_new_he(pTHX)
 
 
 #endif
+
+/* ---- SwissTable hash storage -------------------------------------------- */
+
+#define SWISS_EMPTY          ((U8)0x80)
+#define SWISS_DELETED        ((U8)0xFE)
+#define SWISS_H2(h)          ((U8)(((h) >> 25) & 0x7F))
+#define SWISS_MAX_LOAD(cap)  ((cap) - ((cap) >> 3)) /* 7/8 max load factor */
+
+struct mt_swiss_slot {
+    HEK *hek;
+    SV  *val;
+};
+
+/* Map a Swiss slot pointer to an HE* whose HeKEY_hek and HeVAL alias
+ * slot->hek and slot->val directly (e.g. gv.c writes via &HeVAL(he)). */
+#define SWISS_SLOT_PAD 16
+#define SWISS_SLOT_TO_HE(slot) \
+    ((HE *)((char *)(slot) - offsetof(struct he, hent_hek)))
+
+struct mt_swiss {
+    U8                   *ctrl;        /* cap + 16 control bytes (16B mirror) */
+    struct mt_swiss_slot *slots;       /* cap slots, co-allocated with ctrl */
+    STRLEN                cap;         /* power of 2 >= 16 */
+    STRLEN                growth_left; /* remaining EMPTY slots before rehash */
+    HE                  **legacy;      /* lazy chained HE** compatibility view */
+    U32                   flags;
+};
+
+#define HvSWISS_PTR(hv) \
+    ((struct mt_swiss *)((uintptr_t)HvARRAY_raw(hv) & ~(uintptr_t)1))
+#define HvSWISS_SET(hv, ptr) \
+    (HvARRAY_raw(hv) = (HE **)((uintptr_t)(ptr) | (uintptr_t)1))
+
+static int
+S_swiss_enabled(void)
+{
+    static int cached = -1;
+    if (UNLIKELY(cached < 0)) {
+        const char *e = getenv("PERL_MT_SWISS");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+    }
+    return cached;
+}
+
+static bool
+S_hv_can_go_swiss(pTHX_ HV *hv)
+{
+    if (!S_swiss_enabled())
+        return FALSE;
+    if (hv == PL_strtab)
+        return FALSE;
+    if (SvFLAGS(hv) & SVf_IMMORTAL)
+        return FALSE;
+    if (HvHasAUX(hv) && (HvAUX_raw(hv)->xhv_aux_flags & HvAUXf_NO_SWISS))
+        return FALSE;
+    if (SvRMAGICAL(hv) && mg_find((const SV *)hv, PERL_MAGIC_tied))
+        return FALSE;
+    return TRUE;
+}
+
+/* SWAR scalar twin for 16-byte control group matching. */
+static inline U8
+S_swiss_swar_highbits8(U64 eq)
+{
+#if BYTEORDER == 0x1234 || BYTEORDER == 0x12345678
+    return (U8)(((eq >> 7) * 0x0102040810204080ULL) >> 56);
+#else
+    U8 m = 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        if (eq & (0x80ULL << (56 - 8 * i)))
+            m |= (U8)(1U << i);
+    }
+    return m;
+#endif
+}
+
+static inline U16
+S_swiss_match_byte_scalar(const U8 *ctrl, U8 b)
+{
+    U64 lo, hi;
+    U64 pat = 0x0101010101010101ULL * (U64)b;
+    U64 xlo, xhi, elo, ehi;
+    memcpy(&lo, ctrl, 8);
+    memcpy(&hi, ctrl + 8, 8);
+    xlo = lo ^ pat;
+    xhi = hi ^ pat;
+    elo = (xlo - 0x0101010101010101ULL) & ~xlo & 0x8080808080808080ULL;
+    ehi = (xhi - 0x0101010101010101ULL) & ~xhi & 0x8080808080808080ULL;
+    return (U16)S_swiss_swar_highbits8(elo)
+         | ((U16)S_swiss_swar_highbits8(ehi) << 8);
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted_scalar(const U8 *ctrl)
+{
+    U64 lo, hi;
+    memcpy(&lo, ctrl, 8);
+    memcpy(&hi, ctrl + 8, 8);
+    lo &= 0x8080808080808080ULL;
+    hi &= 0x8080808080808080ULL;
+    return (U16)S_swiss_swar_highbits8(lo)
+         | ((U16)S_swiss_swar_highbits8(hi) << 8);
+}
+
+#if !defined(PERL_FORCE_SCALAR) && defined(__aarch64__)
+static inline U16
+S_swiss_neon_movemask(uint8x16_t cmp)
+{
+    static const uint8_t weights[16] = {
+        1, 2, 4, 8, 16, 32, 64, 128,
+        1, 2, 4, 8, 16, 32, 64, 128
+    };
+    uint8x16_t bits = vandq_u8(cmp, vld1q_u8(weights));
+    return (U16)vaddv_u8(vget_low_u8(bits))
+         | ((U16)vaddv_u8(vget_high_u8(bits)) << 8);
+}
+
+static inline U16
+S_swiss_match_byte_simd(const U8 *ctrl, U8 b)
+{
+    return S_swiss_neon_movemask(vceqq_u8(vld1q_u8(ctrl), vdupq_n_u8(b)));
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted_simd(const U8 *ctrl)
+{
+    return S_swiss_neon_movemask(vcgeq_u8(vld1q_u8(ctrl), vdupq_n_u8(0x80)));
+}
+#elif !defined(PERL_FORCE_SCALAR) && defined(__SSE2__)
+static inline U16
+S_swiss_match_byte_simd(const U8 *ctrl, U8 b)
+{
+    __m128i v = _mm_loadu_si128((const __m128i *)ctrl);
+    return (U16)_mm_movemask_epi8(_mm_cmpeq_epi8(v, _mm_set1_epi8((char)b)));
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted_simd(const U8 *ctrl)
+{
+    __m128i v = _mm_loadu_si128((const __m128i *)ctrl);
+    return (U16)_mm_movemask_epi8(v);
+}
+#elif !defined(PERL_FORCE_SCALAR) && defined(__ALTIVEC__)
+static inline U16
+S_swiss_match_byte_simd(const U8 *ctrl, U8 b)
+{
+    __vector unsigned char v = vec_xl(0, (const unsigned char *)ctrl);
+    __vector unsigned char m = (__vector unsigned char)vec_cmpeq(v, vec_splats((unsigned char)b));
+    U8 tmp[16];
+    U16 mask = 0;
+    int i;
+    vec_xst(m, 0, tmp);
+    for (i = 0; i < 16; i++)
+        if (tmp[i]) mask |= (U16)(1U << i);
+    return mask;
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted_simd(const U8 *ctrl)
+{
+    return S_swiss_match_empty_or_deleted_scalar(ctrl);
+}
+#else
+static inline U16
+S_swiss_match_byte_simd(const U8 *ctrl, U8 b)
+{
+    return S_swiss_match_byte_scalar(ctrl, b);
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted_simd(const U8 *ctrl)
+{
+    return S_swiss_match_empty_or_deleted_scalar(ctrl);
+}
+#endif
+
+static inline U16
+S_swiss_match_byte(pTHX_ const U8 *ctrl, U8 b)
+{
+    PERL_UNUSED_CONTEXT;
+    if (PERL_SIMD_ON())
+        return S_swiss_match_byte_simd(ctrl, b);
+    return S_swiss_match_byte_scalar(ctrl, b);
+}
+
+static inline U16
+S_swiss_match_empty_or_deleted(pTHX_ const U8 *ctrl)
+{
+    PERL_UNUSED_CONTEXT;
+    if (PERL_SIMD_ON())
+        return S_swiss_match_empty_or_deleted_simd(ctrl);
+    return S_swiss_match_empty_or_deleted_scalar(ctrl);
+}
+
+static inline void
+S_swiss_set_ctrl(struct mt_swiss *swiss, STRLEN idx, U8 b)
+{
+    swiss->ctrl[idx] = b;
+    if (idx < 16)
+        swiss->ctrl[swiss->cap + idx] = b;
+}
+
+static void
+S_swiss_invalidate_legacy(pTHX_ struct mt_swiss *swiss)
+{
+    PERL_UNUSED_CONTEXT;
+    if (UNLIKELY(swiss->legacy != NULL)) {
+        STRLEN i;
+        HE **leg = swiss->legacy;
+        for (i = 0; i < swiss->cap; i++) {
+            HE *he = leg[i];
+            while (he) {
+                HE *next = HeNEXT(he);
+                Safefree(he);
+                he = next;
+            }
+        }
+        Safefree(leg);
+        swiss->legacy = NULL;
+    }
+}
+
+#ifdef USE_ITHREADS
+static pthread_mutex_t mt_swiss_immortal_mu = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+HE ***
+Perl_hv_array_ptr_nocontext(HV *hv)
+{
+    dTHX;
+    struct mt_swiss *swiss = HvSWISS_PTR(hv);
+    if (!swiss) {
+        if (HvHasAUX(hv) && !(SvFLAGS(hv) & SVf_IMMORTAL))
+            HvAUX_raw(hv)->xhv_aux_flags &= ~HvAUXf_SWISS;
+        return &hv->sv_u.svu_hash;
+    }
+    if (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)) {
+        if (__atomic_load_n(&swiss->legacy, __ATOMIC_ACQUIRE))
+            return &swiss->legacy;
+#ifdef USE_ITHREADS
+        pthread_mutex_lock(&mt_swiss_immortal_mu);
+#endif
+        if (!swiss->legacy) {
+            STRLEN cap = swiss->cap;
+            STRLEN mask = cap - 1;
+            STRLEN i;
+            HE **leg;
+            Newxz(leg, cap, HE *);
+            for (i = 0; i < cap; i++) {
+                if ((swiss->ctrl[i] & 0x80) == 0) {
+                    HEK *hek = swiss->slots[i].hek;
+                    HE *he;
+                    STRLEN b = HEK_HASH(hek) & mask;
+                    Newx(he, 1, HE);
+                    HeKEY_hek(he) = hek;
+                    HeVAL(he) = swiss->slots[i].val;
+                    HeNEXT(he) = leg[b];
+                    leg[b] = he;
+                }
+            }
+            __atomic_store_n(&swiss->legacy, leg, __ATOMIC_RELEASE);
+        }
+#ifdef USE_ITHREADS
+        pthread_mutex_unlock(&mt_swiss_immortal_mu);
+#endif
+        return &swiss->legacy;
+    }
+    if (!swiss->legacy) {
+        STRLEN cap = swiss->cap;
+        STRLEN mask = cap - 1;
+        STRLEN i;
+        HE **leg;
+        Newxz(leg, cap, HE *);
+        for (i = 0; i < cap; i++) {
+            if ((swiss->ctrl[i] & 0x80) == 0) {
+                HEK *hek = swiss->slots[i].hek;
+                HE *he;
+                STRLEN b = HEK_HASH(hek) & mask;
+                Newx(he, 1, HE);
+                HeKEY_hek(he) = hek;
+                HeVAL(he) = swiss->slots[i].val;
+                HeNEXT(he) = leg[b];
+                leg[b] = he;
+            }
+        }
+        swiss->legacy = leg;
+    }
+    return &swiss->legacy;
+}
+
+HE **
+Perl_hv_array(pTHX_ HV *hv)
+{
+    PERL_UNUSED_CONTEXT;
+    return HvARRAY(hv);
+}
+
+static struct mt_swiss *
+S_swiss_alloc(STRLEN cap)
+{
+    struct mt_swiss *swiss;
+    STRLEN slots_bytes = cap * sizeof(struct mt_swiss_slot);
+    char *buf;
+
+    Newxz(swiss, 1, struct mt_swiss);
+    Newx(buf, SWISS_SLOT_PAD + slots_bytes + cap + 16, char);
+    Zero(buf, SWISS_SLOT_PAD, char);
+    swiss->slots = (struct mt_swiss_slot *)(buf + SWISS_SLOT_PAD);
+    swiss->ctrl  = (U8 *)(buf + SWISS_SLOT_PAD + slots_bytes);
+    memset(swiss->ctrl, SWISS_EMPTY, cap + 16);
+    swiss->cap = cap;
+    swiss->growth_left = SWISS_MAX_LOAD(cap);
+    return swiss;
+}
+
+static void
+S_swiss_free(pTHX_ HV *hv)
+{
+    struct mt_swiss *swiss = HvSWISS_PTR(hv);
+    if (swiss) {
+        S_swiss_invalidate_legacy(aTHX_ swiss);
+        if (swiss->slots)
+            Safefree((char *)swiss->slots - SWISS_SLOT_PAD);
+        Safefree(swiss);
+    }
+    HvARRAY_raw(hv) = NULL;
+    if (HvHasAUX(hv))
+        HvAUX_raw(hv)->xhv_aux_flags &= ~HvAUXf_SWISS;
+    HvMAX(hv) = PERL_HASH_DEFAULT_HvMAX;
+}
+
+static inline SSize_t
+S_swiss_find_slot(pTHX_ struct mt_swiss *swiss, const char *key, STRLEN klen,
+                  U32 hash, int flags, HEK *keysv_hek)
+{
+    const STRLEN mask = swiss->cap - 1;
+    const U8 h2 = SWISS_H2(hash);
+    STRLEN pos = hash & mask;
+    STRLEN step = 0;
+
+    for (;;) {
+        U16 mm = S_swiss_match_byte(aTHX_ swiss->ctrl + pos, h2);
+        while (mm) {
+            int bit = __builtin_ctz(mm);
+            STRLEN idx;
+            HEK *hek;
+            mm &= (U16)(mm - 1);
+            idx = (pos + (STRLEN)bit) & mask;
+            hek = swiss->slots[idx].hek;
+            if (keysv_hek && hek == keysv_hek)
+                return (SSize_t)idx;
+            if (HEK_HASH(hek) == hash
+                && HEK_LEN(hek) == (I32)klen
+                && memEQ(HEK_KEY(hek), key, klen)
+                && !((HEK_FLAGS(hek) ^ flags) & HVhek_UTF8))
+            {
+                return (SSize_t)idx;
+            }
+        }
+        if (S_swiss_match_byte(aTHX_ swiss->ctrl + pos, SWISS_EMPTY))
+            return -1;
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
+
+static inline STRLEN
+S_swiss_find_insert_slot(pTHX_ struct mt_swiss *swiss, U32 hash)
+{
+    const STRLEN mask = swiss->cap - 1;
+    STRLEN pos = hash & mask;
+    STRLEN step = 0;
+
+    for (;;) {
+        U16 mm = S_swiss_match_empty_or_deleted(aTHX_ swiss->ctrl + pos);
+        if (mm) {
+            int bit = __builtin_ctz(mm);
+            return (pos + (STRLEN)bit) & mask;
+        }
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
+
+static void
+S_swiss_rehash(pTHX_ HV *hv, STRLEN newcap)
+{
+    struct mt_swiss *swiss = HvSWISS_PTR(hv);
+    struct mt_swiss_slot *old_slots = swiss->slots;
+    U8 *old_ctrl = swiss->ctrl;
+    STRLEN old_cap = swiss->cap;
+    STRLEN slots_bytes;
+    char *buf;
+    STRLEN i;
+
+    if (newcap < 16)
+        newcap = 16;
+    if (newcap > (STRLEN)(MAX_BUCKET_MAX + 1))
+        newcap = (STRLEN)(MAX_BUCKET_MAX + 1);
+    while (HvTOTALKEYS(hv) >= SWISS_MAX_LOAD(newcap)
+           && newcap < (STRLEN)(MAX_BUCKET_MAX + 1))
+        newcap <<= 1;
+
+    S_swiss_invalidate_legacy(aTHX_ swiss);
+
+    slots_bytes = newcap * sizeof(struct mt_swiss_slot);
+    PL_nomemok = TRUE;
+    Newx(buf, SWISS_SLOT_PAD + slots_bytes + newcap + 16, char);
+    PL_nomemok = FALSE;
+    if (!buf)
+        return;
+
+    Zero(buf, SWISS_SLOT_PAD, char);
+    swiss->slots = (struct mt_swiss_slot *)(buf + SWISS_SLOT_PAD);
+    swiss->ctrl  = (U8 *)(buf + SWISS_SLOT_PAD + slots_bytes);
+    memset(swiss->ctrl, SWISS_EMPTY, newcap + 16);
+    swiss->cap = newcap;
+    swiss->growth_left = SWISS_MAX_LOAD(newcap);
+
+    for (i = 0; i < old_cap; i++) {
+        if ((old_ctrl[i] & 0x80) == 0) {
+            HEK *hek = old_slots[i].hek;
+            U32 h = HEK_HASH(hek);
+            STRLEN dst = S_swiss_find_insert_slot(aTHX_ swiss, h);
+            S_swiss_set_ctrl(swiss, dst, SWISS_H2(h));
+            swiss->slots[dst].hek = hek;
+            swiss->slots[dst].val = old_slots[i].val;
+            swiss->growth_left--;
+        }
+    }
+
+    Safefree((char *)old_slots - SWISS_SLOT_PAD);
+    HvMAX(hv) = newcap - 1;
+}
+
+static struct xpvhv_aux *S_hv_auxinit(pTHX_ HV *hv);
+static void S_clear_placeholders(pTHX_ HV *hv, const U32 placeholders);
+
+static bool
+S_swiss_convert_from_chained(pTHX_ HV *hv, STRLEN newcap)
+{
+    HE **old_arr;
+    STRLEN old_cap;
+    struct mt_swiss *swiss;
+    STRLEN i;
+
+    if (newcap < 16)
+        newcap = 16;
+    while (HvTOTALKEYS(hv) >= SWISS_MAX_LOAD(newcap)
+           && newcap < (STRLEN)(MAX_BUCKET_MAX + 1))
+        newcap <<= 1;
+    if (newcap > (STRLEN)(MAX_BUCKET_MAX + 1))
+        return FALSE;
+
+    if (!HvHasAUX(hv))
+        S_hv_auxinit(aTHX_ hv);
+
+    if (HvLAZYDEL(hv) && HvAUX(hv)->xhv_eiter) {
+        HvLAZYDEL_off(hv);
+        hv_free_ent(NULL, HvAUX(hv)->xhv_eiter);
+        HvAUX(hv)->xhv_eiter = NULL;
+    }
+
+    old_arr = HvARRAY_raw(hv);
+    old_cap = HvMAX(hv) + 1;
+
+    swiss = S_swiss_alloc(newcap);
+    if (old_arr) {
+        for (i = 0; i < old_cap; i++) {
+            HE *he = old_arr[i];
+            while (he) {
+                HE *next = HeNEXT(he);
+                HEK *hek = HeKEY_hek(he);
+                U32 h = HEK_HASH(hek);
+                STRLEN dst = S_swiss_find_insert_slot(aTHX_ swiss, h);
+                S_swiss_set_ctrl(swiss, dst, SWISS_H2(h));
+                swiss->slots[dst].hek = hek;
+                swiss->slots[dst].val = HeVAL(he);
+                swiss->growth_left--;
+                del_HE(he);
+                he = next;
+            }
+        }
+        Safefree(old_arr);
+    }
+
+    HvSWISS_SET(hv, swiss);
+    HvMAX(hv) = newcap - 1;
+    HvAUX_raw(hv)->xhv_aux_flags |= HvAUXf_SWISS;
+
+    if (HvTOTALKEYS(hv) && LARGE_HASH_HEURISTIC(hv, HvTOTALKEYS(hv)))
+        HvSHAREKEYS_off(hv);
+
+    return TRUE;
+}
+
 
 STATIC HEK *
 S_save_hek_flags(const char *str, I32 len, U32 hash, int flags)
@@ -499,6 +1006,14 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
 
     assert(SvTYPE(hv) == SVt_PVHV);
 
+    /* perl5-mt: a hash in the sealed boot image is read through, but
+     * every store or delete goes to this worker's shadow of it (the
+     * eval/require overlay), see mt_worker.c */
+    if (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL) && !(action & HV_MT_RAW))
+        return Perl_mt_hv_common_immortal(aTHX_ hv, keysv, key, klen, flags,
+                                          action, val, hash);
+    action &= ~HV_MT_RAW;
+
     if (SvSMAGICAL(hv) && SvGMAGICAL(hv) && !(action & HV_DISABLE_UVAR_XKEY)) {
         MAGIC* mg;
         if ((mg = mg_find((const SV *)hv, PERL_MAGIC_uvar))) {
@@ -553,6 +1068,11 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     }
 
     if (action & HV_DELETE) {
+        /* perl5-mt: an immortal hash reaches here only with HV_MT_RAW,
+         * i.e. for the existence check made by the shadow logic */
+        if (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL))
+            return Perl_mt_hv_common_immortal(aTHX_ hv, keysv, key, klen,
+                                              flags, action, val, hash);
         return (void *) hv_delete_common(hv, keysv, key, klen,
                                          flags | (is_utf8 ? HVhek_UTF8 : 0),
                                          action, hash);
@@ -732,7 +1252,7 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
         } /* ISSTORE */
     } /* SvMAGICAL */
 
-    if (!HvARRAY(hv)) {
+    if (!HvARRAY_raw(hv)) {
         if ((action & (HV_FETCH_LVALUE | HV_FETCH_ISSTORE))
 #ifdef DYNAMIC_ENV_FETCH  /* if it's an %ENV lookup, we may get it on the fly */
                  || (SvRMAGICAL((const SV *)hv)
@@ -743,7 +1263,7 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
             Newxz(array,
                  PERL_HV_ARRAY_ALLOC_BYTES(xhv->xhv_max+1 /* HvMAX(hv)+1 */),
                  char);
-            HvARRAY(hv) = (HE**)array;
+            HvARRAY_raw(hv) = (HE**)array;
         }
 #ifdef DYNAMIC_ENV_FETCH
         else if (action & HV_FETCH_ISEXISTS) {
@@ -787,12 +1307,142 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     else if (!hash)
         PERL_HASH(hash, key, klen);
 
+    if (HvSWISS(hv)) {
+        struct mt_swiss *swiss = HvSWISS_PTR(hv);
+        SSize_t idx = S_swiss_find_slot(aTHX_ swiss, key, klen, hash, flags,
+                                        keysv_hek);
+        if (idx >= 0) {
+            struct mt_swiss_slot *slot = &swiss->slots[idx];
+            if (action & (HV_FETCH_LVALUE|HV_FETCH_ISSTORE)) {
+                if (UNLIKELY(swiss->legacy != NULL) && !(SvFLAGS(hv) & SVf_IMMORTAL))
+                    S_swiss_invalidate_legacy(aTHX_ swiss);
+                if ((HEK_FLAGS(slot->hek) ^ flags) & HVhek_WASUTF8) {
+                    S_swiss_invalidate_legacy(aTHX_ swiss);
+                    if ((HEK_FLAGS(slot->hek) & HVhek_NOTSHARED) == 0) {
+                        HEK * const new_hek
+                            = share_hek_flags(key, klen, hash, flags & ~HVhek_FREEKEY);
+                        unshare_hek(slot->hek);
+                        slot->hek = new_hek;
+                    }
+                    else {
+                        HEK_FLAGS(slot->hek) ^= HVhek_WASUTF8;
+                    }
+                    if (flags & HVhek_ENABLEHVKFLAGS)
+                        HvHASKFLAGS_on(hv);
+                }
+                if (slot->val == &PL_sv_placeholder) {
+                    if (action & HV_FETCH_LVALUE) {
+                        if (SvMAGICAL(hv))
+                            goto swiss_not_found_placeholder;
+                        val = newSV_type(SVt_NULL);
+                        HvPLACEHOLDERS(hv)--;
+                    } else {
+                        if (val != &PL_sv_placeholder)
+                            HvPLACEHOLDERS(hv)--;
+                    }
+                    S_swiss_invalidate_legacy(aTHX_ swiss);
+                    slot->val = val;
+                } else if (action & HV_FETCH_ISSTORE) {
+                    S_swiss_invalidate_legacy(aTHX_ swiss);
+                    SvREFCNT_dec(slot->val);
+                    slot->val = val;
+                }
+            } else if (slot->val == &PL_sv_placeholder) {
+                goto swiss_not_found_placeholder;
+            }
+            if (flags & HVhek_FREEKEY)
+                Safefree(key);
+            if (return_svp)
+                return (void *) &slot->val;
+            return (void *) SWISS_SLOT_TO_HE(slot);
+        }
+
+      swiss_not_found_placeholder:
 #ifdef DYNAMIC_ENV_FETCH
-    if (!HvARRAY(hv)) entry = NULL;
+        if (!(action & HV_FETCH_ISSTORE)
+            && SvRMAGICAL((const SV *)hv)
+            && mg_find((const SV *)hv, PERL_MAGIC_env)) {
+            unsigned long len;
+            const char * const env = PerlEnv_ENVgetenv_len(key,&len);
+            if (env) {
+                sv = newSVpvn(env,len);
+                SvTAINTED_on(sv);
+                return hv_common(hv, keysv, key, klen, flags,
+                                 HV_FETCH_ISSTORE|HV_DISABLE_UVAR_XKEY|return_svp,
+                                 sv, hash);
+            }
+        }
+#endif
+        if (idx < 0 && HvRESTRICTED(hv) && !(action & HV_FETCH_ISEXISTS)) {
+            hv_notallowed(flags, key, klen,
+                          "Attempt to access disallowed key '%" SVf "' in"
+                          " a restricted hash");
+        }
+        if (!(action & (HV_FETCH_LVALUE|HV_FETCH_ISSTORE))) {
+            if (flags & HVhek_FREEKEY)
+                Safefree(key);
+            return NULL;
+        }
+        if (action & HV_FETCH_LVALUE) {
+            val = action & HV_FETCH_EMPTY_HE ? NULL : newSV_type(SVt_NULL);
+            if (SvMAGICAL(hv)) {
+                return hv_common(hv, keysv, key, klen, flags,
+                                 HV_FETCH_ISSTORE|HV_DISABLE_UVAR_XKEY|return_svp,
+                                 val, hash);
+            }
+        }
+
+        /* Insert new key into SwissTable */
+        S_swiss_invalidate_legacy(aTHX_ swiss);
+        if (swiss->growth_left == 0) {
+            const U32 items = (U32)HvPLACEHOLDERS_get(hv);
+            if (items && !HvRESTRICTED(hv))
+                S_clear_placeholders(aTHX_ hv, items);
+            if (HvTOTALKEYS(hv) < (swiss->cap >> 1))
+                S_swiss_rehash(aTHX_ hv, swiss->cap);
+            else
+                S_swiss_rehash(aTHX_ hv, swiss->cap << 1);
+        }
+        {
+            HEK *new_hek;
+            STRLEN dst;
+            U8 old_ctrl;
+
+            if (LIKELY(HvSHAREKEYS(hv)))
+                new_hek = share_hek_flags(key, klen, hash, flags);
+            else
+                new_hek = save_hek_flags(key, klen, hash, flags);
+
+            dst = S_swiss_find_insert_slot(aTHX_ swiss, hash);
+            old_ctrl = swiss->ctrl[dst];
+            S_swiss_set_ctrl(swiss, dst, SWISS_H2(hash));
+            swiss->slots[dst].hek = new_hek;
+            swiss->slots[dst].val = val;
+            if (old_ctrl == SWISS_EMPTY)
+                swiss->growth_left--;
+
+#ifdef PERL_HASH_RANDOMIZE_KEYS
+            MAYBE_UPDATE_HASH_RAND_BITS_KEY(HEK_KEY(new_hek), HEK_LEN(new_hek));
+            HvAUX(hv)->xhv_rand = (U32)PL_hash_rand_bits;
+#endif
+            if (val == &PL_sv_placeholder)
+                HvPLACEHOLDERS(hv)++;
+            if (flags & HVhek_ENABLEHVKFLAGS)
+                HvHASKFLAGS_on(hv);
+            xhv->xhv_keys++;
+
+            if (return_svp)
+                return (void *) &swiss->slots[dst].val;
+            return (void *) SWISS_SLOT_TO_HE(&swiss->slots[dst]);
+        }
+    }
+
+#ifdef DYNAMIC_ENV_FETCH
+    if (!HvARRAY_raw(hv)) entry = NULL;
     else
 #endif
     {
-        entry = (HvARRAY(hv))[hash & (I32) HvMAX(hv)];
+        entry = (HvARRAY_raw(hv))[hash & (I32) HvMAX(hv)];
     }
 
     if (!entry)
@@ -925,7 +1575,7 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     }
 #endif
 
-    if (!entry && SvREADONLY(hv) && !(action & HV_FETCH_ISEXISTS)) {
+    if (!entry && HvRESTRICTED(hv) && !(action & HV_FETCH_ISEXISTS)) {
         hv_notallowed(flags, key, klen,
                         "Attempt to access disallowed key '%" SVf "' in"
                         " a restricted hash");
@@ -960,7 +1610,7 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
 
     /* Welcome to hv_store...  */
 
-    if (!HvARRAY(hv)) {
+    if (!HvARRAY_raw(hv)) {
         /* Not sure if we can get here.  I think the only case of oentry being
            NULL is for %ENV with dynamic env fetch.  But that should disappear
            with magic in the previous code.  */
@@ -968,10 +1618,10 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
         Newxz(array,
              PERL_HV_ARRAY_ALLOC_BYTES(xhv->xhv_max+1 /* HvMAX(hv)+1 */),
              char);
-        HvARRAY(hv) = (HE**)array;
+        HvARRAY_raw(hv) = (HE**)array;
     }
 
-    oentry = &(HvARRAY(hv))[hash & (I32) xhv->xhv_max];
+    oentry = &(HvARRAY_raw(hv))[hash & (I32) xhv->xhv_max];
 
     /* share_hek_flags will do the free for us.  This might be considered
        bad API design.  */
@@ -1044,24 +1694,26 @@ Perl_hv_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     if ( in_collision && DO_HSPLIT(xhv) ) {
         const STRLEN oldsize = xhv->xhv_max + 1;
         const U32 items = (U32)HvPLACEHOLDERS_get(hv);
+        HEK * const saved_hek = HeKEY_hek(entry);
 
         if (items /* hash has placeholders  */
-            && !SvREADONLY(hv) /* but is not a restricted hash */) {
-            /* If this hash previously was a "restricted hash" and had
-               placeholders, but the "restricted" flag has been turned off,
-               then the placeholders no longer serve any useful purpose.
-               However, they have the downsides of taking up RAM, and adding
-               extra steps when finding used values. It's safe to clear them
-               at this point, even though Storable rebuilds restricted hashes by
-               putting in all the placeholders (first) before turning on the
-               readonly flag, because Storable always pre-splits the hash.
-               If we're lucky, then we may clear sufficient placeholders to
-               avoid needing to split the hash at all.  */
+            && !HvRESTRICTED(hv) /* but is not a restricted hash */) {
             clear_placeholders(hv, items);
             if (DO_HSPLIT(xhv))
                 hsplit(hv, oldsize, oldsize * 2);
         } else
             hsplit(hv, oldsize, oldsize * 2);
+
+        if (UNLIKELY(HvSWISS(hv))) {
+            struct mt_swiss *swiss = HvSWISS_PTR(hv);
+            SSize_t idx = S_swiss_find_slot(aTHX_ swiss, HEK_KEY(saved_hek),
+                                            HEK_LEN(saved_hek), HEK_HASH(saved_hek),
+                                            HEK_FLAGS(saved_hek), saved_hek);
+            assert(idx >= 0);
+            if (return_svp)
+                return (void *) &swiss->slots[idx].val;
+            return (void *) SWISS_SLOT_TO_HE(&swiss->slots[idx]);
+        }
     }
 
     if (return_svp) {
@@ -1361,7 +2013,45 @@ S_hv_delete_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     else if (!hash)
         PERL_HASH(hash, key, klen);
 
-    first_entry = oentry = &(HvARRAY(hv))[hash & (I32) HvMAX(hv)];
+    if (HvSWISS(hv)) {
+        struct mt_swiss *swiss = HvSWISS_PTR(hv);
+        SSize_t idx = S_swiss_find_slot(aTHX_ swiss, key, klen, hash, k_flags,
+                                        keysv_hek);
+        if (idx < 0)
+            goto not_found;
+        sv = swiss->slots[idx].val;
+        if (sv == &PL_sv_placeholder) {
+            if (k_flags & HVhek_FREEKEY)
+                Safefree(key);
+            return NULL;
+        }
+        if (HvRESTRICTED(hv) && sv && SvREADONLY(sv)) {
+            hv_notallowed(k_flags, key, klen,
+                          "Attempt to delete readonly key '%" SVf "' from"
+                          " a restricted hash");
+        }
+        S_swiss_invalidate_legacy(aTHX_ swiss);
+        if (HvRESTRICTED(hv)) {
+            swiss->slots[idx].val = &PL_sv_placeholder;
+            HvPLACEHOLDERS(hv)++;
+        }
+        else {
+            HEK *old_hek = swiss->slots[idx].hek;
+            S_swiss_set_ctrl(swiss, (STRLEN)idx, SWISS_DELETED);
+            swiss->slots[idx].hek = NULL;
+            swiss->slots[idx].val = NULL;
+            if ((HEK_FLAGS(old_hek) & HVhek_NOTSHARED) == 0)
+                unshare_hek(old_hek);
+            else
+                Safefree(old_hek);
+            xhv->xhv_keys--;
+            if (xhv->xhv_keys == 0)
+                HvHASKFLAGS_off(hv);
+        }
+        goto swiss_deleted;
+    }
+
+    first_entry = oentry = &(HvARRAY_raw(hv))[hash & (I32) HvMAX(hv)];
     entry = *oentry;
 
     if (!entry)
@@ -1419,7 +2109,7 @@ S_hv_delete_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
                 Safefree(key);
             return NULL;
         }
-        if (SvREADONLY(hv) && sv && SvREADONLY(sv)) {
+        if (HvRESTRICTED(hv) && sv && SvREADONLY(sv)) {
             hv_notallowed(k_flags, key, klen,
                             "Attempt to delete readonly key '%" SVf "' from"
                             " a restricted hash");
@@ -1431,7 +2121,7 @@ S_hv_delete_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
          * we can still access via not-really-existing key without raising
          * an error.
          */
-        if (SvREADONLY(hv)) {
+        if (HvRESTRICTED(hv)) {
             /* We'll be saving this slot, so the number of allocated keys
              * doesn't go down, but the number placeholders goes up */
             HeVAL(entry) = &PL_sv_placeholder;
@@ -1454,6 +2144,7 @@ S_hv_delete_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
                 HvHASKFLAGS_off(hv);
         }
 
+      swiss_deleted:
         /* If this is a stash and the key ends with ::, then someone is 
          * deleting a package.
          */
@@ -1575,7 +2266,7 @@ S_hv_delete_common(pTHX_ HV *hv, SV *keysv, const char *key, STRLEN klen,
     }
 
   not_found:
-    if (SvREADONLY(hv)) {
+    if (HvRESTRICTED(hv)) {
         hv_notallowed(k_flags, key, klen,
                         "Attempt to delete disallowed key '%" SVf "' from"
                         " a restricted hash");
@@ -1625,12 +2316,25 @@ STATIC void
 S_hsplit(pTHX_ HV *hv, STRLEN const oldsize, STRLEN newsize)
 {
     STRLEN i = 0;
-    char *a = (char*) HvARRAY(hv);
+    char *a;
     HE **aep;
 
     PERL_ARGS_ASSERT_HSPLIT;
     if (newsize > MAX_BUCKET_MAX+1)
             return;
+
+    if (HvSWISS(hv)) {
+        S_swiss_rehash(aTHX_ hv, newsize);
+        return;
+    }
+    if (newsize > (STRLEN)(PERL_HASH_DEFAULT_HvMAX + 1)
+        && S_hv_can_go_swiss(aTHX_ hv))
+    {
+        if (S_swiss_convert_from_chained(aTHX_ hv, newsize))
+            return;
+    }
+
+    a = (char*) HvARRAY_raw(hv);
 
     PL_nomemok = TRUE;
     Renew(a, PERL_HV_ARRAY_ALLOC_BYTES(newsize), char);
@@ -1647,7 +2351,7 @@ S_hsplit(pTHX_ HV *hv, STRLEN const oldsize, STRLEN newsize)
      * very few ops to do so. ROTL32() should produce a single machine operation. */
     MAYBE_UPDATE_HASH_RAND_BITS();
 #endif
-    HvARRAY(hv) = (HE**) a;
+    HvARRAY_raw(hv) = (HE**) a;
     HvMAX(hv) = newsize - 1;
     /* now we can safely clear the second half */
     Zero(&a[oldsize * sizeof(HE*)], (newsize-oldsize) * sizeof(HE*), char);	/* zero 2nd half*/
@@ -1752,7 +2456,7 @@ Perl_hv_ksplit(pTHX_ HV *hv, IV newmax)
     if (newsize <= oldsize)
         return;                                            /* overflow detection */
 
-    a = (char *) HvARRAY(hv);
+    a = (char *) HvARRAY_raw(hv);
     if (a) {
 #ifdef PERL_HASH_RANDOMIZE_KEYS
         U32 was_ook = HvHasAUX(hv);
@@ -1767,9 +2471,13 @@ Perl_hv_ksplit(pTHX_ HV *hv, IV newmax)
     } else {
         if (LARGE_HASH_HEURISTIC(hv, newmax))
             HvSHAREKEYS_off(hv);
-        Newxz(a, PERL_HV_ARRAY_ALLOC_BYTES(newsize), char);
-        xhv->xhv_max = newsize - 1;
-        HvARRAY(hv) = (HE **) a;
+        if (newsize > PERL_HASH_DEFAULT_HvMAX + 1 && S_hv_can_go_swiss(aTHX_ hv)) {
+            S_swiss_convert_from_chained(aTHX_ hv, (STRLEN)newsize);
+        } else {
+            Newxz(a, PERL_HV_ARRAY_ALLOC_BYTES(newsize), char);
+            xhv->xhv_max = newsize - 1;
+            HvARRAY_raw(hv) = (HE **) a;
+        }
     }
 }
 
@@ -2013,6 +2721,13 @@ return.
 void
 Perl_hv_clear(pTHX_ HV *hv)
 {
+    /* perl5-mt: a frozen hash cannot be cleared; a worker tearing down
+     * simply leaves it alone */
+    if (hv && UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)) {
+        if (PL_eval_overlay_active || PL_phase == PERL_PHASE_DESTRUCT)
+            return;
+        Perl_croak_mt(aTHX_ MT_IMMORTAL_MUTATION);
+    }
     SSize_t orig_ix;
 
     if (!hv)
@@ -2024,32 +2739,63 @@ Perl_hv_clear(pTHX_ HV *hv)
     EXTEND_MORTAL(1);
     PL_tmps_stack[++PL_tmps_ix] = SvREFCNT_inc_simple_NN(hv);
     orig_ix = PL_tmps_ix;
-    if (SvREADONLY(hv) && HvTOTALKEYS(hv)) {
+    if (HvRESTRICTED(hv) && HvTOTALKEYS(hv)) {
         /* restricted hash: convert all keys to placeholders */
-        STRLEN max = HvMAX(hv);
-        STRLEN i;
-        for (i = 0; i <= max; i++) {
-            HE *entry = (HvARRAY(hv))[i];
-            for (; entry; entry = HeNEXT(entry)) {
-                /* not already placeholder */
-                if (HeVAL(entry) != &PL_sv_placeholder) {
-                    if (HeVAL(entry)) {
-                        if (SvREADONLY(HeVAL(entry))) {
-                            SV* const keysv = hv_iterkeysv(entry);
-                            Perl_croak_nocontext(
-                                "Attempt to delete readonly key '%" SVf "' from a restricted hash",
-                                (void*)keysv);
+        if (HvSWISS(hv)) {
+            struct mt_swiss *swiss = HvSWISS_PTR(hv);
+            STRLEN i;
+            S_swiss_invalidate_legacy(aTHX_ swiss);
+            for (i = 0; i < swiss->cap; i++) {
+                if ((swiss->ctrl[i] & 0x80) == 0) {
+                    SV *v = swiss->slots[i].val;
+                    if (v != &PL_sv_placeholder) {
+                        if (v) {
+                            if (SvREADONLY(v)) {
+                                SV * const keysv = sv_2mortal(newSVhek(swiss->slots[i].hek));
+                                Perl_croak_nocontext(
+                                    "Attempt to delete readonly key '%" SVf "' from a restricted hash",
+                                    (void*)keysv);
+                            }
+                            SvREFCNT_dec_NN(v);
                         }
-                        SvREFCNT_dec_NN(HeVAL(entry));
+                        swiss->slots[i].val = &PL_sv_placeholder;
+                        HvPLACEHOLDERS(hv)++;
                     }
-                    HeVAL(entry) = &PL_sv_placeholder;
-                    HvPLACEHOLDERS(hv)++;
+                }
+            }
+        }
+        else {
+            STRLEN max = HvMAX(hv);
+            STRLEN i;
+            for (i = 0; i <= max; i++) {
+                HE *entry = (HvARRAY_raw(hv))[i];
+                for (; entry; entry = HeNEXT(entry)) {
+                    /* not already placeholder */
+                    if (HeVAL(entry) != &PL_sv_placeholder) {
+                        if (HeVAL(entry)) {
+                            if (SvREADONLY(HeVAL(entry))) {
+                                SV* const keysv = hv_iterkeysv(entry);
+                                Perl_croak_nocontext(
+                                    "Attempt to delete readonly key '%" SVf "' from a restricted hash",
+                                    (void*)keysv);
+                            }
+                            SvREFCNT_dec_NN(HeVAL(entry));
+                        }
+                        HeVAL(entry) = &PL_sv_placeholder;
+                        HvPLACEHOLDERS(hv)++;
+                    }
                 }
             }
         }
     }
     else {
         hv_free_entries(hv);
+        if (HvSWISS(hv) && HvTOTALKEYS(hv) == 0) {
+            struct mt_swiss *swiss = HvSWISS_PTR(hv);
+            S_swiss_invalidate_legacy(aTHX_ swiss);
+            memset(swiss->ctrl, SWISS_EMPTY, swiss->cap + 16);
+            swiss->growth_left = SWISS_MAX_LOAD(swiss->cap);
+        }
         HvPLACEHOLDERS_set(hv, 0);
 
         if (SvRMAGICAL(hv))
@@ -2105,6 +2851,35 @@ S_clear_placeholders(pTHX_ HV *hv, const U32 placeholders)
     PERL_ARGS_ASSERT_CLEAR_PLACEHOLDERS;
 
     assert(to_find);
+
+    if (HvSWISS(hv)) {
+        struct mt_swiss *swiss = HvSWISS_PTR(hv);
+        STRLEN idx;
+        S_swiss_invalidate_legacy(aTHX_ swiss);
+        for (idx = 0; idx < swiss->cap; idx++) {
+            if ((swiss->ctrl[idx] & 0x80) == 0
+                && swiss->slots[idx].val == &PL_sv_placeholder)
+            {
+                HEK *old_hek = swiss->slots[idx].hek;
+                S_swiss_set_ctrl(swiss, idx, SWISS_DELETED);
+                swiss->slots[idx].hek = NULL;
+                swiss->slots[idx].val = NULL;
+                if ((HEK_FLAGS(old_hek) & HVhek_NOTSHARED) == 0)
+                    unshare_hek(old_hek);
+                else
+                    Safefree(old_hek);
+                if (--to_find == 0) {
+                    HvTOTALKEYS(hv) -= (IV)placeholders;
+                    if (HvTOTALKEYS(hv) == 0)
+                        HvHASKFLAGS_off(hv);
+                    HvPLACEHOLDERS_set(hv, 0);
+                    return;
+                }
+            }
+        }
+        assert(to_find == 0);
+        NOT_REACHED;
+    }
 
     i = HvMAX(hv);
     do {
@@ -2198,7 +2973,50 @@ Perl_hfree_next_entry(pTHX_ HV *hv, STRLEN *indexp)
     if (!((XPVHV*)SvANY(hv))->xhv_keys)
         return NULL;
 
-    array = HvARRAY(hv);
+    if (HvSWISS(hv)) {
+        struct mt_swiss *swiss = HvSWISS_PTR(hv);
+        STRLEN cap = swiss->cap;
+        STRLEN idx = *indexp;
+        HEK *hek;
+        SV *val;
+
+        S_swiss_invalidate_legacy(aTHX_ swiss);
+        if (idx >= cap)
+            idx = 0;
+        while ((swiss->ctrl[idx] & 0x80) != 0) {
+            if (++idx >= cap)
+                idx = 0;
+        }
+        hek = swiss->slots[idx].hek;
+        val = swiss->slots[idx].val;
+        S_swiss_set_ctrl(swiss, idx, SWISS_DELETED);
+        swiss->slots[idx].hek = NULL;
+        swiss->slots[idx].val = NULL;
+        ((XPVHV*)SvANY(hv))->xhv_keys--;
+        *indexp = (idx + 1 < cap) ? idx + 1 : 0;
+
+        if (   PL_phase != PERL_PHASE_DESTRUCT && HvHasENAME(hv)
+            && val && isGV(val)
+            && GvHV(val) && HvHasENAME(GvHV(val))
+        ) {
+            STRLEN klen = (STRLEN)HEK_LEN(hek);
+            const char * const key = HEK_KEY(hek);
+            if ((klen > 1 && key[klen-1]==':' && key[klen-2]==':')
+             || (klen == 1 && key[0] == ':')) {
+                mro_package_moved(
+                 NULL, GvHV(val),
+                 (GV *)val, 0
+                );
+            }
+        }
+        if ((HEK_FLAGS(hek) & HVhek_NOTSHARED) == 0)
+            unshare_hek(hek);
+        else
+            Safefree(hek);
+        return val;
+    }
+
+    array = HvARRAY_raw(hv);
     assert(array);
     while ( ! ((entry = array[*indexp])) ) {
         if ((*indexp)++ >= HvMAX(hv))
@@ -2248,6 +3066,12 @@ Perl_hv_undef_flags(pTHX_ HV *hv, U32 flags)
 
     if (!hv)
         return;
+    /* perl5-mt: a frozen hash is never undefined (see hv_clear) */
+    if (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL)) {
+        if (PL_eval_overlay_active || PL_phase == PERL_PHASE_DESTRUCT)
+            return;
+        Perl_croak_mt(aTHX_ MT_IMMORTAL_MUTATION);
+    }
     save = cBOOL(SvREFCNT(hv));
     DEBUG_A(Perl_hv_assert(aTHX_ hv));
 
@@ -2356,9 +3180,13 @@ Perl_hv_undef_flags(pTHX_ HV *hv, U32 flags)
       }
     }
 
-    Safefree(HvARRAY(hv));
-    HvMAX(hv) = PERL_HASH_DEFAULT_HvMAX;        /* 7 (it's a normal hash) */
-    HvARRAY(hv) = 0;
+    if (HvSWISS(hv)) {
+        S_swiss_free(aTHX_ hv);
+    } else {
+        Safefree(HvARRAY_raw(hv));
+        HvMAX(hv) = PERL_HASH_DEFAULT_HvMAX;        /* 7 (it's a normal hash) */
+        HvARRAY_raw(hv) = 0;
+    }
 
     /* if we're freeing the HV, the SvMAGIC field has been reused for
      * other purposes, and so there can't be any placeholder magic */
@@ -2941,51 +3769,15 @@ Perl_hv_iternext_flags(pTHX_ HV *hv, I32 flags)
            with it.  */
         hv_iterinit(hv);
     }
-    else if (!HvARRAY(hv)) {
-        /* Since 5.002 calling hv_iternext() has ensured that HvARRAY() is
-           non-NULL. There was explicit code for this added as part of commit
-           4633a7c4bad06b47, without any explicit comment as to why, but from
-           code inspection it seems to be a fix to ensure that the later line
-               entry = ((HE**)xhv->xhv_array)[xhv->xhv_riter];
-           was accessing a valid address, because that lookup in the loop was
-           always reached even if the hash had no keys.
-
-           That explicit code was removed in 2005 as part of b79f7545f218479c:
-               Store the xhv_aux structure after the main array.
-               This reduces the size of HV bodies from 24 to 20 bytes on a 32 bit
-               build. It has the side effect of defined %symbol_table:: now always
-               being true. defined %hash is already deprecated.
-
-           with a comment and assertion added to note that after the call to
-           hv_iterinit() HvARRAY() will now always be non-NULL.
-
-           In turn, that potential NULL-pointer access within the loop was made
-           unreachable in 2009 by commit 9eb4ebd1619c0362
-               In Perl_hv_iternext_flags(), clarify and generalise the empty hash bailout code.
-
-           which skipped the entire while loop if the hash had no keys.
-           (If the hash has any keys, HvARRAY() cannot be NULL.)
-           Hence the code in hv_iternext_flags() has long been able to handle
-           HvARRAY() being NULL because no keys are allocated.
-
-           Now that we have decoupled the aux structure from HvARRAY(),
-           HvARRAY() can now be NULL even when SVf_OOK is true (and the aux
-           struct is allocated and correction initialised).
-
-           Is this actually a guarantee that we need to make? We should check
-           whether anything is actually relying on this, or if we are simply
-           making work for ourselves.
-
-           For now, keep the behaviour as-was - after calling hv_iternext_flags
-           ensure that HvARRAY() is non-NULL. Many (other) things are changing -
-           no need to add risk by changing this too. But in the future we should
-           consider changing hv_iternext_flags() to avoid allocating HvARRAY()
-           here, and potentially also we avoid allocating HvARRAY()
-           automatically in hv_auxinit() */
-
+    else if (UNLIKELY(SvFLAGS(hv) & SVf_IMMORTAL) && !HvARRAY_raw(hv)) {
+        /* perl5-mt: an empty frozen hash; nothing to iterate and nothing
+         * may be written to it */
+        return NULL;
+    }
+    else if (!HvARRAY_raw(hv)) {
         char *array;
         Newxz(array, PERL_HV_ARRAY_ALLOC_BYTES(HvMAX(hv) + 1), char);
-        HvARRAY(hv) = (HE**)array;
+        HvARRAY_raw(hv) = (HE**)array;
     }
 
     iter = HvAUX(hv);
@@ -3032,6 +3824,54 @@ Perl_hv_iternext_flags(pTHX_ HV *hv, I32 flags)
         prime_env_iter();
     }
 #endif
+
+    if (HvSWISS(hv)) {
+        struct mt_swiss *swiss = HvSWISS_PTR(hv);
+        STRLEN max = HvMAX(hv);
+#ifdef PERL_HASH_RANDOMIZE_KEYS
+        if (iter->xhv_last_rand != iter->xhv_rand) {
+            if (iter->xhv_riter != -1) {
+                Perl_ck_warner_d(aTHX_ packWARN(WARN_INTERNAL),
+                                 "Use of each() on hash after insertion without resetting hash iterator results in undefined behavior"
+                                 pTHX__FORMAT
+                                 pTHX__VALUE);
+            }
+            iter->xhv_last_rand = iter->xhv_rand;
+        }
+#endif
+        if ((flags & HV_ITERNEXT_WANTPLACEHOLDERS)
+            ? HvTOTALKEYS(hv) : HvUSEDKEYS(hv))
+        {
+            for (;;) {
+                STRLEN idx;
+                iter->xhv_riter++;
+                if (iter->xhv_riter > (I32)max) {
+                    iter->xhv_riter = -1;
+#ifdef PERL_HASH_RANDOMIZE_KEYS
+                    iter->xhv_last_rand = iter->xhv_rand;
+#endif
+                    iter->xhv_eiter = NULL;
+                    return NULL;
+                }
+                idx = PERL_HASH_ITER_BUCKET(iter) & max;
+                if ((swiss->ctrl[idx] & 0x80) != 0)
+                    continue;
+                if (!(flags & HV_ITERNEXT_WANTPLACEHOLDERS)
+                    && swiss->slots[idx].val == &PL_sv_placeholder)
+                    continue;
+                iter->xhv_eiter = SWISS_SLOT_TO_HE(&swiss->slots[idx]);
+                return iter->xhv_eiter;
+            }
+        }
+        else {
+            iter->xhv_riter = -1;
+#ifdef PERL_HASH_RANDOMIZE_KEYS
+            iter->xhv_last_rand = iter->xhv_rand;
+#endif
+            iter->xhv_eiter = NULL;
+            return NULL;
+        }
+    }
 
     /* hv_iterinit now ensures this.  */
     assert (HvARRAY(hv));

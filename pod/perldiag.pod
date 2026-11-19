@@ -5285,6 +5285,203 @@ on the version of Perl you are using because it is too new.
 Maybe the code needs to be updated, or maybe it is simply
 wrong and the version check should just be removed.
 
+=item perl5-mt: capability table full (%d slots) (MT_WORKER_FAILED)
+
+(F) C<MT::Cap::mint> found no free slot in the capability table.  The
+table is sized once, at its first use, from C<PERL_MT_CAP_SLOTS> (65536
+slots by default); capabilities whose last handle has gone are reclaimed
+by their owner at its next C<MT::Cap::reap>.
+
+=item perl5-mt: AUTOLOAD without a method name (MT_NO_COMPARTMENT)
+
+(F) C<MT::XS::Proxy::AUTOLOAD> or C<MT::XS::Proxy::Obj::AUTOLOAD> was
+called directly rather than through a method call, so there is no method
+name to forward to the compartment.
+
+=item perl5-mt: compartment cannot load %s: %s (MT_NO_COMPARTMENT)
+
+(F) An XS compartment was asked to load a legacy XS module that could not
+be C<require>d there, and its shared object could not be C<dlopen>ed
+either; the second C<%s> is the loader's message.
+
+=item perl5-mt: XS module %s uses MY_CXT without a CLONE method (MT_MY_CXT_WITHOUT_CLONE)
+
+(F) C<MT::Image::freeze> found that the named XS module, booted before the
+freeze, keeps per-interpreter state in C<MY_CXT> but defines no C<CLONE>
+method.  Workers replay C<CLONE> so that a module re-creates that state
+for itself; without one every worker would use the image's sealed copy
+and fault on its first write.  Add a C<CLONE> method with C<MY_CXT_CLONE>
+to the module, load it only inside workers (where it is served by an XS
+compartment), or list it in C<%MT::XS::inprocess_ok> if its state is
+never written after boot.
+
+=item perl5-mt: the worker that owns this callback is not waiting on this compartment (MT_COMPARTMENT_DEAD)
+
+(F) XS code in an XS compartment called a code reference that came from a
+worker, but that worker is not inside a call to this compartment (it has
+gone, or the callback was kept and invoked later from another worker's
+call), so there is nobody to run it.
+
+=item perl5-mt: no capability table in this worker (MT_WORKER_FAILED)
+
+(F) A worker used C<MT::Cap> but the process has no capability table.
+The table is created by the main interpreter alone, at the freeze
+(C<MT::Image::freeze>) or on its own first use; a worker never builds
+one.  This cannot happen for a worker spawned after a freeze.
+
+=item perl5-mt: no free XS bridge slot (PERL_MT_XS_SLOTS) (MT_NO_COMPARTMENT)
+
+(F) Every slot of the XS bridge (a reply ring and an arena per interpreter
+that talks to a compartment) is in use.  The number of slots is fixed when
+the compartments are created at the freeze: set C<PERL_MT_XS_SLOTS> (64
+by default) to at least the number of workers alive at once.
+
+=item perl5-mt: no joinable worker %d (MT_WORKER_FAILED)
+
+(F) C<MT::Worker::join> was given an id that does not name a running
+worker: it was never spawned, or it has already been joined.
+
+=item perl5-mt: not a capability handle (MT_STALE_CAP)
+
+(F) An C<MT::Cap> function was given a value that is not a capability
+handle (a scalar returned by C<MT::Cap::mint>, or received from another
+worker); C<MT::Cap::is_cap> tells.
+
+=item perl5-mt: the x86 shadow stack is active: fibers cannot run on it yet (MT_SHSTK_UNSUPPORTED)
+
+(F) C<MT::Ctx::selftest> was called in a process whose kernel has the x86
+shadow stack (CET) enabled.  The fiber context switch does not yet map
+shadow stacks for its contexts (see F<MT_README.md>, "The fiber context
+switch"), so it refuses to run rather than fault in the middle of a switch.
+C<MT::Ctx::shstk_active> tells whether the process is in this state.
+
+=item perl5-mt: cannot map the guarded stack of a fiber context (MT_CTX_STACK)
+
+(F) C<MT::Ctx::selftest> could not map its two 64 KiB stacks with a guard
+page below each one: C<mmap> or C<mprotect> failed, most likely because the
+address space or the memory limit is exhausted.
+
+=item perl5-mt: a context switch clobbered a callee-saved register (MT_CTX_CLOBBERED)
+
+(F) The self-test of the fiber context switch found that a value kept in a
+callee-saved register (or the rounding mode, on amd64) did not survive a
+round trip through C<mt_ctx_swap>.  This is a bug in the perl5-mt build for
+this architecture; please report it with the output of C<perl -V>.
+
+=item perl5-mt: exit() called inside a fiber (MT_EXIT_IN_FIBER)
+
+(F) C<exit> was called from code running in a fiber (see the fiber functions in F<MT_README.md>).
+A fiber cannot end the process: the fiber dies with this message instead,
+and C<MT::Fiber::join> rethrows it.
+
+=item perl5-mt: no such fiber in this interpreter (MT_NOT_A_FIBER)
+
+(F) An C<MT::Fiber> function was given an id that does not name a live
+fiber of this interpreter: it was never spawned, it has already been
+joined, or it was spawned by another worker (fibers live in exactly one
+interpreter).
+
+=item perl5-mt: operation is only valid inside a fiber (MT_NOT_IN_FIBER)
+
+(F) C<MT::Fiber::yield> was called on the main context, which is not a
+fiber: there is nothing for it to return to.
+
+=item perl5-mt: fiber has already finished (MT_FIBER_FINISHED)
+
+(F) C<MT::Fiber::resume> was called on a fiber whose code has returned or
+died.  C<MT::Fiber::join> returns its result or rethrows its death, and
+C<MT::Fiber::is_finished> tells whether it has finished.
+
+=item perl5-mt: fiber is running: it is the current fiber or one that resumed it (MT_FIBER_BUSY)
+
+(F) C<MT::Fiber::resume> or C<MT::Fiber::join> was called on a fiber that
+has been resumed and has not yielded yet.  That is the running fiber
+itself, or a fiber further up the chain of resumes; a fiber can resume
+only fibers below it.
+
+=item perl5-mt: fiber yielded or was resumed during compilation (MT_YIELD_IN_COMPILE)
+
+(F) A fiber tried to yield while Perl was compiling code inside it, for
+example from a C<BEGIN> block in a string eval, or C<MT::Fiber::resume> was
+called while a compilation was under way.  A compilation cannot be
+suspended, so the yield (or the resume) is refused.
+
+=item perl5-mt: operation needs a scheduled fiber: this fiber was resumed explicitly (MT_FIBER_NOT_SCHEDULED)
+
+(F) C<MT::Fiber::park> or C<MT::Fiber::pass> was called in a fiber that was
+resumed with C<MT::Fiber::resume>.  Only a fiber that the scheduler resumes
+can park or pass; a fiber gets that by being scheduled with
+C<MT::Fiber::schedule> or C<MT::Fiber::ready>.
+
+=item perl5-mt: fiber is scheduled: run resumes it, resume must not (MT_FIBER_IS_SCHEDULED)
+
+(F) C<MT::Fiber::resume> was called on a fiber that belongs to the scheduler:
+it has been made ready by C<MT::Fiber::schedule> or C<MT::Fiber::ready>.  The
+loop of C<MT::Fiber::run> resumes it, and a second resumer would run it out
+of the queue.
+
+=item perl5-mt: fiber is scheduled and has not finished: call run to finish it (MT_FIBER_NOT_FINISHED)
+
+(F) C<MT::Fiber::join> was called on a scheduled fiber that has not finished.
+The scheduler owns it, so C<join> does not resume it; call C<MT::Fiber::run>
+until it has finished, and then join it.
+
+=item perl5-mt: scheduler deadlock: %d parked, none ready (MT_FIBER_DEADLOCK)
+
+(F) C<MT::Fiber::run> found no ready fiber, and no idle hook had one to offer,
+but some fibers were parked.  Only a C<MT::Fiber::wake> makes a parked fiber
+ready again, and nothing could have called it.  The message gives the number
+of parked fibers.
+
+=item perl5-mt: too many remote calls in flight from this worker (MT_XS_TOO_MANY_INFLIGHT)
+
+(F) A fiber made a remote XS call while the worker already had
+C<PERL_MT_XS_INFLIGHT> (default 64) calls in flight.  The reply ring of the
+worker's slot holds that many replies at most, so the call is refused rather
+than queued.  Let the calls in flight finish, or raise the limit.
+
+=item perl5-mt: a scheduler loop is already running in this interpreter (MT_SCHED_NESTED)
+
+(F) C<MT::Fiber::run> was called while a C<run> loop was already running in
+the same interpreter, for example from a scheduled fiber.  The loop cannot
+be nested; the fibers it has scheduled run in the outer loop.
+
+=item MT::Fiber::spawn: the first argument is not a code reference
+
+(F) C<MT::Fiber::spawn> and C<MT::Fiber::schedule> take a code reference as
+their first argument, which is the code the fiber runs.  Anything else is
+refused.
+
+=item perl5-mt: %s (%s)
+
+(F) The multithreaded core of perl5-mt refused an operation.  The first
+C<%s> explains what went wrong and the second is the symbolic C<MT_*>
+code from F<mt_err.h>, for example C<MT_IMMORTAL_MUTATION> when code
+tried to modify, un-readonly, upgrade or share a value that is immortal
+(a process-wide constant such as C<undef>, or a member of the sealed
+boot image that worker threads share).
+
+=item perl5-mt: %d worker(s) still running at exit; joined them before the interpreter was destroyed
+
+(S) The main interpreter was being destroyed while worker threads still ran
+(for example a worker started with C<MT::Worker::spawn> and never joined).  The
+workers were joined before the cleanup, so the program waited for them: a
+worker that never returns keeps the program from ending.  Join the workers, or
+shut the pool down with C<MT::Pool::shutdown>, before the program ends.
+
+=item MT :async: no shared buffers for the aio ring
+
+(F) The C<:async> PerlIO layer needs a shared memory segment for the
+registered buffers of its interpreter's aio ring, and the kernel refused
+one.  Free some memory, or do not open C<:async> handles here.
+
+=item MT :async: no aio on this kernel (%s)
+
+(F) The C<:async> PerlIO layer needs the kernel's asynchronous I/O
+(io_uring on Linux, the dispatch queue and kqueue on macOS), and this
+kernel does not offer it.  The first C<%s> names the platform.  Open the
+handles with C<:unix> or C<:perlio> instead.
+
 =item perl: warning: Non hex character in '$ENV{PERL_HASH_SEED}', seed only partially set
 
 (S) PERL_HASH_SEED should match /^\s*(?:0x)?[0-9a-fA-F]+\s*\z/ but it

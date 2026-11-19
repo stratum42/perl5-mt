@@ -1,0 +1,5 @@
+perl5-mt (5.40.2-1) unstable; urgency=medium
+
+  * Initial perl5-mt Debian package with optional PGO and native tuning.
+
+ -- perl5-mt packagers <maintainers@perl5-mt.local>  Wed, 18 Nov 2026 12:00:00 +0000

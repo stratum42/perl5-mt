@@ -1,0 +1,14 @@
+Source: perl5-mt
+Section: interpreters
+Priority: optional
+Maintainer: perl5-mt packagers <maintainers@perl5-mt.local>
+Build-Depends: debhelper (>= 13), build-essential
+Standards-Version: 4.6.2
+
+Package: perl5-mt
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Multi-threaded Perl 5 interpreter with frozen images and SIMD
+ perl5-mt is a multi-threaded Perl 5.40.2 runtime installed under /opt/perl5-mt
+ providing immutable frozen boot images, per-worker interpreter compartments,
+ cooperative fibers, deterministic numerics, and portable SIMD acceleration.

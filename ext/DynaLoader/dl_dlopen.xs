@@ -210,8 +210,13 @@ dl_load_file(filename, flags=0)
     ST(0) = newSV_type_mortal(SVt_IV);
     if (handle == NULL)
 	SaveError(aTHX_ "%s",dlerror()) ;
-    else
-	sv_setiv( ST(0), PTR2IV(handle));
+    else {
+        /* perl5-mt: while workers are active the tier is decided by
+         * dl_find_symbol, which needs the boot name; hand out a lazy
+         * library handle meanwhile */
+        void * const lazy = Perl_mt_xs_dl_lib_new(aTHX_ handle, filename);
+	sv_setiv( ST(0), PTR2IV(lazy ? lazy : handle));
+    }
 }
 
 
@@ -220,6 +225,9 @@ dl_unload_file(libref)
     void *	libref
   CODE:
     DLDEBUG(1,PerlIO_printf(Perl_debug_log, "dl_unload_file(%lx):\n", PTR2ul(libref)));
+    if (Perl_mt_xs_dl_unload(aTHX_ libref))
+        RETVAL = 1;                        /* perl5-mt: a lazy handle */
+    else
     RETVAL = (dlclose(libref) == 0 ? 1 : 0);
     if (!RETVAL)
         SaveError(aTHX_ "%s", dlerror()) ;
@@ -242,9 +250,36 @@ dl_find_symbol(libhandle, symbolname, ign_err=0)
     DLDEBUG(2, PerlIO_printf(Perl_debug_log,
 			     "dl_find_symbol(handle=%lx, symbol=%s)\n",
 			     (unsigned long) libhandle, symbolname));
+    {
+        /* perl5-mt: a lazy library handle (workers active) decides the
+         * tier here: in-process with the marker, else the compartment */
+        IV out;
+        const char *err;
+        if (Perl_mt_xs_dl_find_symbol(aTHX_ libhandle, symbolname, &out, &err)) {
+            ST(0) = newSV_type_mortal(SVt_IV);
+            if (!out) {
+                if (!ign_err)
+                    SaveError(aTHX_ "%s", err ? err : "symbol not found");
+            }
+            else
+                sv_setiv(ST(0), out);
+            XSRETURN(1);
+        }
+    }
     sym = dlsym(libhandle, symbolname);
     DLDEBUG(2, PerlIO_printf(Perl_debug_log,
 			     "  symbolref = %lx\n", (unsigned long) sym));
+    /* perl5-mt: a boot symbol accompanied by its PERL_XS_THREADSAFE marker
+     * (mt_threadsafe_boot_X) names a module whose XSUBs every worker may
+     * call in-process; dl_install_xsub stamps them through the boot
+     * wrapper */
+    PL_mt_boot_safe_sym = NULL;
+    if (sym && strBEGINs(symbolname, "boot_")) {
+        const char * const marker =
+            Perl_form(aTHX_ "mt_threadsafe_%s", symbolname);
+        if (dlsym(libhandle, marker))
+            PL_mt_boot_safe_sym = sym;
+    }
     ST(0) = newSV_type_mortal(SVt_IV);
     if (sym == NULL) {
         if (!ign_err)
@@ -269,10 +304,11 @@ dl_install_xsub(perl_name, symref, filename="$Package")
     CODE:
     DLDEBUG(2,PerlIO_printf(Perl_debug_log, "dl_install_xsub(name=%s, symref=%" UVxf ")\n",
 		perl_name, PTR2UV(symref)));
-    ST(0) = sv_2mortal(newRV((SV*)newXS_flags(perl_name,
-					      DPTR2FPTR(XSUBADDR_t, symref),
-					      filename, NULL,
-					      XS_DYNAMIC_FILENAME)));
+    /* perl5-mt: a bootstrap goes through the boot wrapper (tier stamping,
+     * MY_CXT bookkeeping); anything else is a plain XSUB */
+    ST(0) = sv_2mortal(newRV((SV*)Perl_mt_xs_install_boot(aTHX_ perl_name,
+							   symref,
+							   filename)));
 
 
 SV *

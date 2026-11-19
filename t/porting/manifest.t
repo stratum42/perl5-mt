@@ -93,6 +93,7 @@ SKIP: {
         !m{\.gitignore$} &&
         !m{\.mailmap$} &&
         !m{^\.github/} &&
+        !m{^\.forgejo/} &&
         -e $_ &&
         !$seen{$_}++
     } `git ls-files`;

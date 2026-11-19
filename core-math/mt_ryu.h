@@ -1,0 +1,1030 @@
+/*
+ * Ryu shortest round-trip IEEE-754 binary64 to decimal string formatter.
+ *
+ * Activated when PERL_NV_SHORTEST=1 is set in the environment; default
+ * Perl %.15g stringification is untouched when unset.
+ *
+ * Produces the shortest decimal representation that rounds back to the
+ * exact binary64 bit pattern under IEEE-754 round-to-nearest-even.
+ * Zero heap allocation, zero libm dependency, C99 + -Wc++-compat safe.
+ */
+
+#ifndef MT_CORE_MATH_RYU_H
+#define MT_CORE_MATH_RYU_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+#define MT_RYU_POW5_INV_BITCOUNT 125
+#define MT_RYU_POW5_BITCOUNT     125
+
+static const uint64_t mt_ryu_pow5_inv_split[342][2] = {
+    { UINT64_C(0x0000000000000001), UINT64_C(0x2000000000000000) }, /* 0 */
+    { UINT64_C(0x999999999999999a), UINT64_C(0x1999999999999999) }, /* 1 */
+    { UINT64_C(0x47ae147ae147ae15), UINT64_C(0x147ae147ae147ae1) }, /* 2 */
+    { UINT64_C(0x6c8b4395810624de), UINT64_C(0x10624dd2f1a9fbe7) }, /* 3 */
+    { UINT64_C(0x7a786c226809d496), UINT64_C(0x1a36e2eb1c432ca5) }, /* 4 */
+    { UINT64_C(0x61f9f01b866e43ab), UINT64_C(0x14f8b588e368f084) }, /* 5 */
+    { UINT64_C(0xb4c7f34938583622), UINT64_C(0x10c6f7a0b5ed8d36) }, /* 6 */
+    { UINT64_C(0x87a6520ec08d236a), UINT64_C(0x1ad7f29abcaf4857) }, /* 7 */
+    { UINT64_C(0x9fb841a566d74f88), UINT64_C(0x15798ee2308c39df) }, /* 8 */
+    { UINT64_C(0xe62d01511f12a607), UINT64_C(0x112e0be826d694b2) }, /* 9 */
+    { UINT64_C(0xd6ae6881cb5109a4), UINT64_C(0x1b7cdfd9d7bdbab7) }, /* 10 */
+    { UINT64_C(0xdef1ed34a2a73aea), UINT64_C(0x15fd7fe17964955f) }, /* 11 */
+    { UINT64_C(0x7f27f0f6e885c8bb), UINT64_C(0x119799812dea1119) }, /* 12 */
+    { UINT64_C(0x650cb4be40d60df8), UINT64_C(0x1c25c268497681c2) }, /* 13 */
+    { UINT64_C(0xea70909833de7193), UINT64_C(0x16849b86a12b9b01) }, /* 14 */
+    { UINT64_C(0x21f3a6e0297ec143), UINT64_C(0x1203af9ee756159b) }, /* 15 */
+    { UINT64_C(0x6985d7cd0f313537), UINT64_C(0x1cd2b297d889bc2b) }, /* 16 */
+    { UINT64_C(0x2137dfd73f5a90f9), UINT64_C(0x170ef54646d49689) }, /* 17 */
+    { UINT64_C(0xe75fe645cc4873fa), UINT64_C(0x12725dd1d243aba0) }, /* 18 */
+    { UINT64_C(0xa5663d3c7a0d865d), UINT64_C(0x1d83c94fb6d2ac34) }, /* 19 */
+    { UINT64_C(0x511e976394d79eb1), UINT64_C(0x179ca10c9242235d) }, /* 20 */
+    { UINT64_C(0xda7edf82dd794bc1), UINT64_C(0x12e3b40a0e9b4f7d) }, /* 21 */
+    { UINT64_C(0x2a6498d1625bac68), UINT64_C(0x1e392010175ee596) }, /* 22 */
+    { UINT64_C(0xeeb6e0a781e2f053), UINT64_C(0x182db34012b25144) }, /* 23 */
+    { UINT64_C(0x58924d52ce4f26a9), UINT64_C(0x1357c299a88ea76a) }, /* 24 */
+    { UINT64_C(0x27507bb7b07ea441), UINT64_C(0x1ef2d0f5da7dd8aa) }, /* 25 */
+    { UINT64_C(0x52a6c95fc0655034), UINT64_C(0x18c240c4aecb13bb) }, /* 26 */
+    { UINT64_C(0x0eebd44c99eaa690), UINT64_C(0x13ce9a36f23c0fc9) }, /* 27 */
+    { UINT64_C(0xb17953adc3110a80), UINT64_C(0x1fb0f6be50601941) }, /* 28 */
+    { UINT64_C(0xc12ddc8b02740867), UINT64_C(0x195a5efea6b34767) }, /* 29 */
+    { UINT64_C(0x3424b06f3529a052), UINT64_C(0x14484bfeebc29f86) }, /* 30 */
+    { UINT64_C(0x901d59f290ee19db), UINT64_C(0x1039d66589687f9e) }, /* 31 */
+    { UINT64_C(0x4cfbc31db4b0295f), UINT64_C(0x19f623d5a8a73297) }, /* 32 */
+    { UINT64_C(0x3d9635b15d59bab2), UINT64_C(0x14c4e977ba1f5bac) }, /* 33 */
+    { UINT64_C(0x97ab5e277de16228), UINT64_C(0x109d8792fb4c4956) }, /* 34 */
+    { UINT64_C(0xf2abc9d8c9689d0d), UINT64_C(0x1a95a5b7f87a0ef0) }, /* 35 */
+    { UINT64_C(0x5bbca17a3aba173e), UINT64_C(0x154484932d2e725a) }, /* 36 */
+    { UINT64_C(0xafca1ac82efb45cb), UINT64_C(0x11039d428a8b8eae) }, /* 37 */
+    { UINT64_C(0xb2dcf7a6b1920945), UINT64_C(0x1b38fb9daa78e44a) }, /* 38 */
+    { UINT64_C(0xf57d92ebc141a104), UINT64_C(0x15c72fb1552d836e) }, /* 39 */
+    { UINT64_C(0xc46475896767b403), UINT64_C(0x116c262777579c58) }, /* 40 */
+    { UINT64_C(0x6d6d88dbd8a5ecd2), UINT64_C(0x1be03d0bf225c6f4) }, /* 41 */
+    { UINT64_C(0x8abe071646eb23db), UINT64_C(0x164cfda3281e38c3) }, /* 42 */
+    { UINT64_C(0x6efe6c11d255b649), UINT64_C(0x11d7314f534b609c) }, /* 43 */
+    { UINT64_C(0xb197134fb6ef8a0e), UINT64_C(0x1c8b821885456760) }, /* 44 */
+    { UINT64_C(0x27ac0f72f8bfa1a5), UINT64_C(0x16d601ad376ab91a) }, /* 45 */
+    { UINT64_C(0xb95672c260994e1e), UINT64_C(0x1244ce242c5560e1) }, /* 46 */
+    { UINT64_C(0xf5571e03cdc21695), UINT64_C(0x1d3ae36d13bbce35) }, /* 47 */
+    { UINT64_C(0x2aac18030b01abab), UINT64_C(0x17624f8a762fd82b) }, /* 48 */
+    { UINT64_C(0xbbbce0026f348956), UINT64_C(0x12b50c6ec4f31355) }, /* 49 */
+    { UINT64_C(0x92c7ccd0b1eda889), UINT64_C(0x1dee7a4ad4b81eef) }, /* 50 */
+    { UINT64_C(0xdbd30a408e57ba07), UINT64_C(0x17f1fb6f10934bf2) }, /* 51 */
+    { UINT64_C(0x7ca8d50071dfc806), UINT64_C(0x1327fc58da0f6ff5) }, /* 52 */
+    { UINT64_C(0xfaa7bb33e9660cd6), UINT64_C(0x1ea6608e29b24cbb) }, /* 53 */
+    { UINT64_C(0x9552fc298784d711), UINT64_C(0x18851a0b548ea3c9) }, /* 54 */
+    { UINT64_C(0xaaa8c9bad2d0ac0e), UINT64_C(0x139dae6f76d88307) }, /* 55 */
+    { UINT64_C(0xdddadc5e1e1aace3), UINT64_C(0x1f62b0b257c0d1a5) }, /* 56 */
+    { UINT64_C(0x7e48b04b4b488a4f), UINT64_C(0x191bc08eac9a4151) }, /* 57 */
+    { UINT64_C(0xcb6d59d5d5d3a1d9), UINT64_C(0x141633a556e1cdda) }, /* 58 */
+    { UINT64_C(0x3c577b1177dc817b), UINT64_C(0x1011c2eaabe7d7e2) }, /* 59 */
+    { UINT64_C(0xc6f25e825960cf2a), UINT64_C(0x19b604aaaca62636) }, /* 60 */
+    { UINT64_C(0x6bf518684780a5bb), UINT64_C(0x14919d5556eb51c5) }, /* 61 */
+    { UINT64_C(0x232a79ed06008496), UINT64_C(0x10747ddddf22a7d1) }, /* 62 */
+    { UINT64_C(0xd1dd8fe1a3340756), UINT64_C(0x1a53fc9631d10c81) }, /* 63 */
+    { UINT64_C(0xa7e4731ae8f66c45), UINT64_C(0x150ffd44f4a73d34) }, /* 64 */
+    { UINT64_C(0x531d28e253f8569e), UINT64_C(0x10d9976a5d52975d) }, /* 65 */
+    { UINT64_C(0xeb61db03b98d5762), UINT64_C(0x1af5bf109550f22e) }, /* 66 */
+    { UINT64_C(0xbc4e48cfc7a445e8), UINT64_C(0x159165a6ddda5b58) }, /* 67 */
+    { UINT64_C(0x6371d3d96c836b20), UINT64_C(0x11411e1f17e1e2ad) }, /* 68 */
+    { UINT64_C(0x9f1c8628ad9f11cd), UINT64_C(0x1b9b6364f3030448) }, /* 69 */
+    { UINT64_C(0xe5b06b53be18db0b), UINT64_C(0x1615e91d8f359d06) }, /* 70 */
+    { UINT64_C(0xeaf3890fcb4715a2), UINT64_C(0x11ab20e472914a6b) }, /* 71 */
+    { UINT64_C(0x44b8db4c7871bc37), UINT64_C(0x1c45016d841baa46) }, /* 72 */
+    { UINT64_C(0x03c715d6c6c1635f), UINT64_C(0x169d9abe03495505) }, /* 73 */
+    { UINT64_C(0x3638de456bcde919), UINT64_C(0x1217aefe69077737) }, /* 74 */
+    { UINT64_C(0x56c163a2461641c1), UINT64_C(0x1cf2b1970e725858) }, /* 75 */
+    { UINT64_C(0xdf011c81d1ab67ce), UINT64_C(0x17288e1271f51379) }, /* 76 */
+    { UINT64_C(0x7f3416ce4155eca5), UINT64_C(0x1286d80ec190dc61) }, /* 77 */
+    { UINT64_C(0x6520247d3556476e), UINT64_C(0x1da48ce468e7c702) }, /* 78 */
+    { UINT64_C(0xea801d30f7783925), UINT64_C(0x17b6d71d20b96c01) }, /* 79 */
+    { UINT64_C(0xbb99b0f3f92cfa84), UINT64_C(0x12f8ac174d612334) }, /* 80 */
+    { UINT64_C(0x5f5c4e532847f739), UINT64_C(0x1e5aacf215683854) }, /* 81 */
+    { UINT64_C(0x7f7d0b75b9d32c2e), UINT64_C(0x18488a5b44536043) }, /* 82 */
+    { UINT64_C(0x9930d5f7c7dc2358), UINT64_C(0x136d3b7c36a919cf) }, /* 83 */
+    { UINT64_C(0x8eb4898c72f9d226), UINT64_C(0x1f152bf9f10e8fb2) }, /* 84 */
+    { UINT64_C(0x722a07a38f2e41b8), UINT64_C(0x18ddbcc7f40ba628) }, /* 85 */
+    { UINT64_C(0xc1bb394fa5be9afa), UINT64_C(0x13e497065cd61e86) }, /* 86 */
+    { UINT64_C(0x9c5ec2190930f7f6), UINT64_C(0x1fd424d6faf030d7) }, /* 87 */
+    { UINT64_C(0x49e56814075a5ff8), UINT64_C(0x197683df2f268d79) }, /* 88 */
+    { UINT64_C(0x6e51201005e1e660), UINT64_C(0x145ecfe5bf520ac7) }, /* 89 */
+    { UINT64_C(0xf1da800cd181851a), UINT64_C(0x104bd984990e6f05) }, /* 90 */
+    { UINT64_C(0x4fc400148268d4f5), UINT64_C(0x1a12f5a0f4e3e4d6) }, /* 91 */
+    { UINT64_C(0xd96999aa01ed772b), UINT64_C(0x14dbf7b3f71cb711) }, /* 92 */
+    { UINT64_C(0xadee1488018ac5bc), UINT64_C(0x10aff95cc5b09274) }, /* 93 */
+    { UINT64_C(0x497ceda668de092c), UINT64_C(0x1ab328946f80ea54) }, /* 94 */
+    { UINT64_C(0x3aca57b853e4d424), UINT64_C(0x155c2076bf9a5510) }, /* 95 */
+    { UINT64_C(0x623b7960431d7683), UINT64_C(0x1116805effaeaa73) }, /* 96 */
+    { UINT64_C(0x9d2bf566d1c8bd9e), UINT64_C(0x1b5733cb32b110b8) }, /* 97 */
+    { UINT64_C(0x7dbcc452416d647f), UINT64_C(0x15df5ca28ef40d60) }, /* 98 */
+    { UINT64_C(0xcafd69db678ab6cc), UINT64_C(0x117f7d4ed8c33de6) }, /* 99 */
+    { UINT64_C(0xab2f0fc572778adf), UINT64_C(0x1bff2ee48e052fd7) }, /* 100 */
+    { UINT64_C(0x88f273045b92d580), UINT64_C(0x1665bf1d3e6a8cac) }, /* 101 */
+    { UINT64_C(0xd3f528d049424466), UINT64_C(0x11eaff4a98553d56) }, /* 102 */
+    { UINT64_C(0xb988414d4203a0a3), UINT64_C(0x1cab3210f3bb9557) }, /* 103 */
+    { UINT64_C(0x6139cdd76802e6e9), UINT64_C(0x16ef5b40c2fc7779) }, /* 104 */
+    { UINT64_C(0xe761717920025254), UINT64_C(0x125915cd68c9f92d) }, /* 105 */
+    { UINT64_C(0xa568b58e999d5086), UINT64_C(0x1d5b561574765b7c) }, /* 106 */
+    { UINT64_C(0x5120913ee14aa6d2), UINT64_C(0x177c44ddf6c515fd) }, /* 107 */
+    { UINT64_C(0xa74d40ff1aa21f0e), UINT64_C(0x12c9d0b1923744ca) }, /* 108 */
+    { UINT64_C(0x0baece64f769cb4a), UINT64_C(0x1e0fb44f50586e11) }, /* 109 */
+    { UINT64_C(0x3c8bd850c5ee3c3b), UINT64_C(0x180c903f7379f1a7) }, /* 110 */
+    { UINT64_C(0xca0979da37f1c9c9), UINT64_C(0x133d4032c2c7f485) }, /* 111 */
+    { UINT64_C(0xa9a8c2f6bfe942db), UINT64_C(0x1ec866b79e0cba6f) }, /* 112 */
+    { UINT64_C(0x2153cf2bccba9be3), UINT64_C(0x18a0522c7e709526) }, /* 113 */
+    { UINT64_C(0x1aa9728970954982), UINT64_C(0x13b374f06526ddb8) }, /* 114 */
+    { UINT64_C(0xf775840f1a88759d), UINT64_C(0x1f8587e7083e2f8c) }, /* 115 */
+    { UINT64_C(0x5f9136727ba05e17), UINT64_C(0x19379fec0698260a) }, /* 116 */
+    { UINT64_C(0x1940f85b9619e4df), UINT64_C(0x142c7ff0054684d5) }, /* 117 */
+    { UINT64_C(0xe100c6afab47ea4c), UINT64_C(0x1023998cd1053710) }, /* 118 */
+    { UINT64_C(0xce67a44c453fdd47), UINT64_C(0x19d28f47b4d524e7) }, /* 119 */
+    { UINT64_C(0xd852e9d69dccb106), UINT64_C(0x14a8729fc3ddb71f) }, /* 120 */
+    { UINT64_C(0x79dbee454b0a2738), UINT64_C(0x1086c219697e2c19) }, /* 121 */
+    { UINT64_C(0x295fe3a211a9d859), UINT64_C(0x1a71368f0f30468f) }, /* 122 */
+    { UINT64_C(0xbab31c81a7bb137a), UINT64_C(0x15275ed8d8f36ba5) }, /* 123 */
+    { UINT64_C(0x6228e39aec95a92f), UINT64_C(0x10ec4be0ad8f8951) }, /* 124 */
+    { UINT64_C(0x9d0e38f7e0ef7517), UINT64_C(0x1b13ac9aaf4c0ee8) }, /* 125 */
+    { UINT64_C(0xb0d82d931a592a79), UINT64_C(0x15a956e225d67253) }, /* 126 */
+    { UINT64_C(0x8d79be0f4847552e), UINT64_C(0x11544581b7dec1dc) }, /* 127 */
+    { UINT64_C(0x158f967eda0bbb7c), UINT64_C(0x1bba08cf8c979c94) }, /* 128 */
+    { UINT64_C(0x77a611ff14d62f97), UINT64_C(0x162e6d72d6dfb076) }, /* 129 */
+    { UINT64_C(0xf951a7ff43de8c79), UINT64_C(0x11bebdf578b2f391) }, /* 130 */
+    { UINT64_C(0xc21c3ffed2fdad8e), UINT64_C(0x1c6463225ab7ec1c) }, /* 131 */
+    { UINT64_C(0x01b0333242648ad8), UINT64_C(0x16b6b5b5155ff017) }, /* 132 */
+    { UINT64_C(0x0159c28e9b83a246), UINT64_C(0x122bc490dde659ac) }, /* 133 */
+    { UINT64_C(0xcef604175f3903a3), UINT64_C(0x1d12d41afca3c2ac) }, /* 134 */
+    { UINT64_C(0x725e69ac4c2d9c83), UINT64_C(0x17424348ca1c9bbd) }, /* 135 */
+    { UINT64_C(0xf5185489d68ae39c), UINT64_C(0x129b69070816e2fd) }, /* 136 */
+    { UINT64_C(0xee8d540fbdab05c6), UINT64_C(0x1dc574d80cf16b2f) }, /* 137 */
+    { UINT64_C(0xbed77672fe226b05), UINT64_C(0x17d12a4670c1228c) }, /* 138 */
+    { UINT64_C(0xff12c528cb4ebc04), UINT64_C(0x130dbb6b8d674ed6) }, /* 139 */
+    { UINT64_C(0xcb513b74787df9a0), UINT64_C(0x1e7c5f127bd87e24) }, /* 140 */
+    { UINT64_C(0x090dc929f9fe614d), UINT64_C(0x18637f41fcad31b7) }, /* 141 */
+    { UINT64_C(0xa0d7d42194cb810a), UINT64_C(0x1382cc34ca2427c5) }, /* 142 */
+    { UINT64_C(0x67bfb9cf5478ce77), UINT64_C(0x1f37ad21436d0c6f) }, /* 143 */
+    { UINT64_C(0x1fcc94a5dd2d71f9), UINT64_C(0x18f9574dcf8a7059) }, /* 144 */
+    { UINT64_C(0x7fd6dd517dbdf4c7), UINT64_C(0x13faac3e3fa1f37a) }, /* 145 */
+    { UINT64_C(0xffbe2ee8c92fee0b), UINT64_C(0x1ff779fd329cb8c3) }, /* 146 */
+    { UINT64_C(0x6631bf20a0f324d6), UINT64_C(0x1992c7fdc216fa36) }, /* 147 */
+    { UINT64_C(0xb827cc1a1a5c1d78), UINT64_C(0x14756ccb01abfb5e) }, /* 148 */
+    { UINT64_C(0x935309ae7b7ce460), UINT64_C(0x105df0a267bcc918) }, /* 149 */
+    { UINT64_C(0x1eeb42b0c594a099), UINT64_C(0x1a2fe76a3f9474f4) }, /* 150 */
+    { UINT64_C(0xe58902270476e6e1), UINT64_C(0x14f31f8832dd2a5c) }, /* 151 */
+    { UINT64_C(0xb7a0ce859d2bebe7), UINT64_C(0x10c27fa028b0eeb0) }, /* 152 */
+    { UINT64_C(0x59014a6f61dfdfd8), UINT64_C(0x1ad0cc33744e4ab4) }, /* 153 */
+    { UINT64_C(0xe0cdd525e7e64cad), UINT64_C(0x1573d68f903ea229) }, /* 154 */
+    { UINT64_C(0x4d7177518651d6f1), UINT64_C(0x11297872d9cbb4ee) }, /* 155 */
+    { UINT64_C(0x7be8bee8d6e957e8), UINT64_C(0x1b758d848fac54b0) }, /* 156 */
+    { UINT64_C(0xfcba3253df211320), UINT64_C(0x15f7a46a0c89dd59) }, /* 157 */
+    { UINT64_C(0x63c8284318e74280), UINT64_C(0x1192e9ee706e4aae) }, /* 158 */
+    { UINT64_C(0x060d0d3827d86a66), UINT64_C(0x1c1e43171a4a1117) }, /* 159 */
+    { UINT64_C(0x6b3da42cecad21eb), UINT64_C(0x167e9c127b6e7412) }, /* 160 */
+    { UINT64_C(0x88fe1cf0bd574e56), UINT64_C(0x11fee341fc585cdb) }, /* 161 */
+    { UINT64_C(0x419694b462254a23), UINT64_C(0x1ccb0536608d615f) }, /* 162 */
+    { UINT64_C(0x67abaa29e81dd4e9), UINT64_C(0x1708d0f84d3de77f) }, /* 163 */
+    { UINT64_C(0xb95621bb2017dd87), UINT64_C(0x126d73f9d764b932) }, /* 164 */
+    { UINT64_C(0xc223692b668c95a5), UINT64_C(0x1d7becc2f23ac1ea) }, /* 165 */
+    { UINT64_C(0xce82ba891ed6de1d), UINT64_C(0x179657025b6234bb) }, /* 166 */
+    { UINT64_C(0xa53562074bdf1818), UINT64_C(0x12deac01e2b4f6fc) }, /* 167 */
+    { UINT64_C(0x3b889cd87964f359), UINT64_C(0x1e3113363787f194) }, /* 168 */
+    { UINT64_C(0xfc6d4a46c783f5e1), UINT64_C(0x18274291c6065adc) }, /* 169 */
+    { UINT64_C(0x30576e9f06032b1a), UINT64_C(0x13529ba7d19eaf17) }, /* 170 */
+    { UINT64_C(0x1a257dcb3cd1de90), UINT64_C(0x1eea92a61c311825) }, /* 171 */
+    { UINT64_C(0x481dfe3c30a7e540), UINT64_C(0x18bba884e35a79b7) }, /* 172 */
+    { UINT64_C(0xd34b31c9c0865100), UINT64_C(0x13c9539d82aec7c5) }, /* 173 */
+    { UINT64_C(0x5211e942cda3b4cd), UINT64_C(0x1fa885c8d117a609) }, /* 174 */
+    { UINT64_C(0x74db21023e1c90a4), UINT64_C(0x19539e3a40dfb807) }, /* 175 */
+    { UINT64_C(0xf715b401cb4a0d50), UINT64_C(0x1442e4fb67196005) }, /* 176 */
+    { UINT64_C(0xf8de299b09080aa7), UINT64_C(0x103583fc527ab337) }, /* 177 */
+    { UINT64_C(0x8e304291a80cddd7), UINT64_C(0x19ef3993b72ab859) }, /* 178 */
+    { UINT64_C(0x3e8d020e200a4b13), UINT64_C(0x14bf6142f8eef9e1) }, /* 179 */
+    { UINT64_C(0x653d9b3e80083c0f), UINT64_C(0x10991a9bfa58c7e7) }, /* 180 */
+    { UINT64_C(0x6ec8f864000d2ce4), UINT64_C(0x1a8e90f9908e0ca5) }, /* 181 */
+    { UINT64_C(0x8bd3f9e999a423ea), UINT64_C(0x153eda614071a3b7) }, /* 182 */
+    { UINT64_C(0x3ca994bae1501cbb), UINT64_C(0x10ff151a99f482f9) }, /* 183 */
+    { UINT64_C(0xc775bac49bb3612b), UINT64_C(0x1b31bb5dc320d18e) }, /* 184 */
+    { UINT64_C(0xd2c4956a16291a89), UINT64_C(0x15c162b168e70e0b) }, /* 185 */
+    { UINT64_C(0xdbd0778811ba7ba1), UINT64_C(0x11678227871f3e6f) }, /* 186 */
+    { UINT64_C(0x2c80bf401c5d929b), UINT64_C(0x1bd8d03f3e9863e6) }, /* 187 */
+    { UINT64_C(0xbd33cc3349e47549), UINT64_C(0x16470cff6546b651) }, /* 188 */
+    { UINT64_C(0xca8fd68f6e505dd4), UINT64_C(0x11d270cc51055ea7) }, /* 189 */
+    { UINT64_C(0x4419574be3b3c953), UINT64_C(0x1c83e7ad4e6efdd9) }, /* 190 */
+    { UINT64_C(0x0347790982f63aa9), UINT64_C(0x16cfec8aa52597e1) }, /* 191 */
+    { UINT64_C(0xcf6c60d468c4fbba), UINT64_C(0x123ff06eea847980) }, /* 192 */
+    { UINT64_C(0xe57a34870e07f92a), UINT64_C(0x1d331a4b10d3f59a) }, /* 193 */
+    { UINT64_C(0x512e906c0b399422), UINT64_C(0x175c1508da432ae2) }, /* 194 */
+    { UINT64_C(0xda8ba6bcd5c7a9b5), UINT64_C(0x12b010d3e1cf5581) }, /* 195 */
+    { UINT64_C(0x90df712e22d90f87), UINT64_C(0x1de6815302e5559c) }, /* 196 */
+    { UINT64_C(0xda4c5a8b4f140c6c), UINT64_C(0x17eb9aa8cf1dde16) }, /* 197 */
+    { UINT64_C(0xaea37ba2a5a9a38a), UINT64_C(0x1322e220a5b17e78) }, /* 198 */
+    { UINT64_C(0x7dd25f6aa2a905a9), UINT64_C(0x1e9e369aa2b59727) }, /* 199 */
+    { UINT64_C(0x97db7f888220d154), UINT64_C(0x187e92154ef7ac1f) }, /* 200 */
+    { UINT64_C(0x797c6606ce80a777), UINT64_C(0x139874ddd8c6234c) }, /* 201 */
+    { UINT64_C(0x8f2d700ae4010bf1), UINT64_C(0x1f5a549627a36bad) }, /* 202 */
+    { UINT64_C(0x0c2459a25000d65a), UINT64_C(0x191510781fb5efbe) }, /* 203 */
+    { UINT64_C(0x701d1481d99a4515), UINT64_C(0x1410d9f9b2f7f2fe) }, /* 204 */
+    { UINT64_C(0xc017439b147b6a77), UINT64_C(0x100d7b2e28c65bfe) }, /* 205 */
+    { UINT64_C(0xccf205c4ed9243f2), UINT64_C(0x19af2b7d0e0a2cca) }, /* 206 */
+    { UINT64_C(0x0a5b37d0be0e9cc2), UINT64_C(0x148c22ca71a1bd6f) }, /* 207 */
+    { UINT64_C(0x0848f973cb3ee3ce), UINT64_C(0x10701bd527b4978c) }, /* 208 */
+    { UINT64_C(0xda0e5bec78649fb0), UINT64_C(0x1a4cf9550c5425ac) }, /* 209 */
+    { UINT64_C(0x7b3eaff060507fc0), UINT64_C(0x150a6110d6a9b7bd) }, /* 210 */
+    { UINT64_C(0x95cbbff380406633), UINT64_C(0x10d51a73deee2c97) }, /* 211 */
+    { UINT64_C(0xefac665266cd7052), UINT64_C(0x1aee90b964b04758) }, /* 212 */
+    { UINT64_C(0x2623850eb8a459db), UINT64_C(0x158ba6fab6f36c47) }, /* 213 */
+    { UINT64_C(0x1e82d0d893b6ae49), UINT64_C(0x113c85955f29236c) }, /* 214 */
+    { UINT64_C(0xfd9e1af41f8ab075), UINT64_C(0x1b9408eefea838ac) }, /* 215 */
+    { UINT64_C(0x97b1af29b2d559f7), UINT64_C(0x16100725988693bd) }, /* 216 */
+    { UINT64_C(0xac8e25baf5777b2c), UINT64_C(0x11a66c1e139edc97) }, /* 217 */
+    { UINT64_C(0x7a7d092b2258c513), UINT64_C(0x1c3d79c9b8fe2dbf) }, /* 218 */
+    { UINT64_C(0x61fda0ef4ead6a76), UINT64_C(0x169794a160cb57cc) }, /* 219 */
+    { UINT64_C(0xe7fe1a590bbdeec5), UINT64_C(0x1212dd4de7091309) }, /* 220 */
+    { UINT64_C(0xa6635d5b45fcb13a), UINT64_C(0x1ceafbafd80e84dc) }, /* 221 */
+    { UINT64_C(0x851c4aaf6b308dc8), UINT64_C(0x172262f3133ed0b0) }, /* 222 */
+    { UINT64_C(0xd0e36ef2bc26d7d4), UINT64_C(0x1281e8c275cbda26) }, /* 223 */
+    { UINT64_C(0xb49f17eac6a48c86), UINT64_C(0x1d9ca79d894629d7) }, /* 224 */
+    { UINT64_C(0x2a18dfef0550706b), UINT64_C(0x17b08617a104ee46) }, /* 225 */
+    { UINT64_C(0x54e0b3259dd9f389), UINT64_C(0x12f39e794d9d8b6b) }, /* 226 */
+    { UINT64_C(0x87cdeb6f62f65274), UINT64_C(0x1e5297287c2f4578) }, /* 227 */
+    { UINT64_C(0xd30b22bf825ea85d), UINT64_C(0x18421286c9bf6ac6) }, /* 228 */
+    { UINT64_C(0x0f3c1bcc684bb9e4), UINT64_C(0x13680ed23aff889f) }, /* 229 */
+    { UINT64_C(0x18602c7a4079296d), UINT64_C(0x1f0ce4839198da98) }, /* 230 */
+    { UINT64_C(0x46b356c833942124), UINT64_C(0x18d71d360e13e213) }, /* 231 */
+    { UINT64_C(0x388f78a029434db6), UINT64_C(0x13df4a91a4dcb4dc) }, /* 232 */
+    { UINT64_C(0x5a7f2766a86baf8a), UINT64_C(0x1fcbaa82a1612160) }, /* 233 */
+    { UINT64_C(0x153285ebb9efbfa2), UINT64_C(0x196fbb9bb44db44d) }, /* 234 */
+    { UINT64_C(0xaa8ed189618c994e), UINT64_C(0x145962e2f6a4903d) }, /* 235 */
+    { UINT64_C(0xeed8a7a11ad6e10c), UINT64_C(0x1047824f2bb6d9ca) }, /* 236 */
+    { UINT64_C(0x7e27729b5e249b45), UINT64_C(0x1a0c03b1df8af611) }, /* 237 */
+    { UINT64_C(0xfe85f549181d4904), UINT64_C(0x14d6695b193bf80d) }, /* 238 */
+    { UINT64_C(0xcb9e5dd4134aa0d0), UINT64_C(0x10ab877c142ff9a4) }, /* 239 */
+    { UINT64_C(0xdf63c9535211014d), UINT64_C(0x1aac0bf9b9e65c3a) }, /* 240 */
+    { UINT64_C(0x191ca10f74da6771), UINT64_C(0x15566ffafb1eb02f) }, /* 241 */
+    { UINT64_C(0xadb080d92a4852c1), UINT64_C(0x1111f32f2f4bc025) }, /* 242 */
+    { UINT64_C(0x15e7348eaa0d5134), UINT64_C(0x1b4feb7eb212cd09) }, /* 243 */
+    { UINT64_C(0xab1f5d3eee710dc4), UINT64_C(0x15d98932280f0a6d) }, /* 244 */
+    { UINT64_C(0xbc1917658b8da49d), UINT64_C(0x117ad428200c0857) }, /* 245 */
+    { UINT64_C(0x2cf4f23c127c3a94), UINT64_C(0x1bf7b9d9cce00d59) }, /* 246 */
+    { UINT64_C(0xf0c3f4fcdb969543), UINT64_C(0x165fc7e170b33de0) }, /* 247 */
+    { UINT64_C(0x5a365d9716121103), UINT64_C(0x11e6398126f5cb1a) }, /* 248 */
+    { UINT64_C(0x9056fc24f01ce804), UINT64_C(0x1ca38f350b22de90) }, /* 249 */
+    { UINT64_C(0xd9df301d8ce3ecd0), UINT64_C(0x16e93f5da2824ba6) }, /* 250 */
+    { UINT64_C(0xe17f59b13d8323da), UINT64_C(0x125432b14ecea2eb) }, /* 251 */
+    { UINT64_C(0x68cbc2b52f38395c), UINT64_C(0x1d53844ee47dd179) }, /* 252 */
+    { UINT64_C(0x53d6355dbf602de3), UINT64_C(0x177603725064a794) }, /* 253 */
+    { UINT64_C(0xa9782ab165e68b1c), UINT64_C(0x12c4cf8ea6b6ec76) }, /* 254 */
+    { UINT64_C(0x0f26aab56fd744fa), UINT64_C(0x1e07b27dd78b13f1) }, /* 255 */
+    { UINT64_C(0x3f52222abfdf6a62), UINT64_C(0x18062864ac6f4327) }, /* 256 */
+    { UINT64_C(0x65db4e88997f884e), UINT64_C(0x1338205089f29c1f) }, /* 257 */
+    { UINT64_C(0x6fc54a7428cc0d4a), UINT64_C(0x1ec033b40fea9365) }, /* 258 */
+    { UINT64_C(0x596aa1f68709a43b), UINT64_C(0x1899c2f673220f84) }, /* 259 */
+    { UINT64_C(0xadeee7f86c07b696), UINT64_C(0x13ae3591f5b4d936) }, /* 260 */
+    { UINT64_C(0x497e3ff3e00c5756), UINT64_C(0x1f7d228322baf524) }, /* 261 */
+    { UINT64_C(0xd464fff64cd6ac45), UINT64_C(0x1930e868e89590e9) }, /* 262 */
+    { UINT64_C(0x4383fff83d7889d1), UINT64_C(0x14272053ed4473ee) }, /* 263 */
+    { UINT64_C(0xcf9cccc69793a174), UINT64_C(0x101f4d0ff1038ff1) }, /* 264 */
+    { UINT64_C(0x7f6147a425b90252), UINT64_C(0x19cbae7fe805b31c) }, /* 265 */
+    { UINT64_C(0xcc4dd2e9b7c7350f), UINT64_C(0x14a2f1ffecd15c16) }, /* 266 */
+    { UINT64_C(0x3d0b0f215fd290d9), UINT64_C(0x10825b3323dab012) }, /* 267 */
+    { UINT64_C(0x61ab4b689950e7c1), UINT64_C(0x1a6a2b85062ab350) }, /* 268 */
+    { UINT64_C(0x4e22a2ba1440b967), UINT64_C(0x1521bc6a6b555c40) }, /* 269 */
+    { UINT64_C(0x0b4ee894dd009453), UINT64_C(0x10e7c9eebc4449cd) }, /* 270 */
+    { UINT64_C(0x1217da87c800ed51), UINT64_C(0x1b0c764ac6d3a948) }, /* 271 */
+    { UINT64_C(0xdb46486ca000bdda), UINT64_C(0x15a391d56bdc876c) }, /* 272 */
+    { UINT64_C(0x490506bd4ccd64af), UINT64_C(0x114fa7ddefe39f8a) }, /* 273 */
+    { UINT64_C(0xa8080ac87ae23ab1), UINT64_C(0x1bb2a62fe638ff43) }, /* 274 */
+    { UINT64_C(0x5339a239fbe82ef4), UINT64_C(0x162884f31e93ff69) }, /* 275 */
+    { UINT64_C(0x75c7b4fb2fecf25d), UINT64_C(0x11ba03f5b20fff87) }, /* 276 */
+    { UINT64_C(0x22d92191e647ea2e), UINT64_C(0x1c5cd322b67fff3f) }, /* 277 */
+    { UINT64_C(0xb57a8141850654f2), UINT64_C(0x16b0a8e891ffff65) }, /* 278 */
+    { UINT64_C(0xc4620101373843f5), UINT64_C(0x1226ed86db3332b7) }, /* 279 */
+    { UINT64_C(0x3a366801f1f39fee), UINT64_C(0x1d0b15a491eb8459) }, /* 280 */
+    { UINT64_C(0xfb5eb99b27f6198b), UINT64_C(0x173c115074bc69e0) }, /* 281 */
+    { UINT64_C(0x2f7efae2865e7ad6), UINT64_C(0x129674405d6387e7) }, /* 282 */
+    { UINT64_C(0xe597f7d0d6fd9156), UINT64_C(0x1dbd86cd6238d971) }, /* 283 */
+    { UINT64_C(0x8479930d78cadaab), UINT64_C(0x17cad23de82d7ac1) }, /* 284 */
+    { UINT64_C(0xd06142712d6f1556), UINT64_C(0x1308a831868ac89a) }, /* 285 */
+    { UINT64_C(0x4d686a4eaf182222), UINT64_C(0x1e74404f3daada91) }, /* 286 */
+    { UINT64_C(0xa453883ef279b4e8), UINT64_C(0x185d003f6488aeda) }, /* 287 */
+    { UINT64_C(0xe9dc6cff28615d87), UINT64_C(0x137d99cc506d58ae) }, /* 288 */
+    { UINT64_C(0xa960ae650d6895a4), UINT64_C(0x1f2f5c7a1a488de4) }, /* 289 */
+    { UINT64_C(0xbab3beb73ded4483), UINT64_C(0x18f2b061aea07183) }, /* 290 */
+    { UINT64_C(0x2ef6322c318a9d36), UINT64_C(0x13f559e7bee6c136) }, /* 291 */
+    { UINT64_C(0xe4bd1d13827761f0), UINT64_C(0x1feef63f97d79b89) }, /* 292 */
+    { UINT64_C(0x83ca7da9352c4e5a), UINT64_C(0x198bf832dfdfafa1) }, /* 293 */
+    { UINT64_C(0x9ca1fe20f756a515), UINT64_C(0x146ff9c24cb2f2e7) }, /* 294 */
+    { UINT64_C(0x4a1b31b3f9121daa), UINT64_C(0x1059949b708f28b9) }, /* 295 */
+    { UINT64_C(0x435eb5ecc1b695dd), UINT64_C(0x1a28edc580e50df5) }, /* 296 */
+    { UINT64_C(0x35e55e57015ede4a), UINT64_C(0x14ed8b04671da4c4) }, /* 297 */
+    { UINT64_C(0xc4b77eac0118b1d5), UINT64_C(0x10be08d0527e1d69) }, /* 298 */
+    { UINT64_C(0xa12597799b5ab622), UINT64_C(0x1ac9a7b3b7302f0f) }, /* 299 */
+    { UINT64_C(0x4db7ac6149155e81), UINT64_C(0x156e1fc2f8f358d9) }, /* 300 */
+    { UINT64_C(0xd7c6238107444b9b), UINT64_C(0x1124e63593f5e0ad) }, /* 301 */
+    { UINT64_C(0x593d059b3ed3ac2b), UINT64_C(0x1b6e3d2286563449) }, /* 302 */
+    { UINT64_C(0xe0fd9e15cbdc89bc), UINT64_C(0x15f1ca820511c36d) }, /* 303 */
+    { UINT64_C(0xb3fe18116fe3a163), UINT64_C(0x118e3b9b37416924) }, /* 304 */
+    { UINT64_C(0x866359b57fd29bd1), UINT64_C(0x1c16c5c525357507) }, /* 305 */
+    { UINT64_C(0xd1e91491330ee30e), UINT64_C(0x16789e3750f790d2) }, /* 306 */
+    { UINT64_C(0x74ba76da8f3f1c0b), UINT64_C(0x11fa182c40c60d75) }, /* 307 */
+    { UINT64_C(0xedf72490e531c678), UINT64_C(0x1cc359e067a348bb) }, /* 308 */
+    { UINT64_C(0x8b2c1d40b75b052d), UINT64_C(0x1702ae4d1fb5d3c9) }, /* 309 */
+    { UINT64_C(0x6f567dcd5f7c0424), UINT64_C(0x12688b70e62b0fd4) }, /* 310 */
+    { UINT64_C(0x7ef0c94898c66d06), UINT64_C(0x1d74124e3d11b2ed) }, /* 311 */
+    { UINT64_C(0x98c0a106e09ebd9f), UINT64_C(0x17900ea4fda7c257) }, /* 312 */
+    { UINT64_C(0x470080d24d4bcae6), UINT64_C(0x12d9a550caec9b79) }, /* 313 */
+    { UINT64_C(0xd800ce1d487944a2), UINT64_C(0x1e29088144adc58e) }, /* 314 */
+    { UINT64_C(0x1333d8176d2dd082), UINT64_C(0x1820d39a9d57d13f) }, /* 315 */
+    { UINT64_C(0xa8f646792424a6ce), UINT64_C(0x134d76154aaca765) }, /* 316 */
+    { UINT64_C(0x74bd3d8ea03aa47d), UINT64_C(0x1ee25688777aa56f) }, /* 317 */
+    { UINT64_C(0x5d64313ee6955064), UINT64_C(0x18b51206c5fbb78c) }, /* 318 */
+    { UINT64_C(0x4ab68dcbebaaa6b7), UINT64_C(0x13c40e6bd1962c70) }, /* 319 */
+    { UINT64_C(0x1124161312aaa457), UINT64_C(0x1fa01712e8f0471a) }, /* 320 */
+    { UINT64_C(0xda8344dc0eeee9df), UINT64_C(0x194cdf4253f36c14) }, /* 321 */
+    { UINT64_C(0xe2029d7cd8bf2180), UINT64_C(0x143d7f6843292343) }, /* 322 */
+    { UINT64_C(0x4e687dfd7a328133), UINT64_C(0x103132b9cf541c36) }, /* 323 */
+    { UINT64_C(0x4a40c9959050ceb8), UINT64_C(0x19e851294bb9c6bd) }, /* 324 */
+    { UINT64_C(0x0833d477a6a70bc6), UINT64_C(0x14b9da876fc7d231) }, /* 325 */
+    { UINT64_C(0xa02976c61eec096b), UINT64_C(0x1094aed2bfd30e8d) }, /* 326 */
+    { UINT64_C(0x004257a364acdbdf), UINT64_C(0x1a877e1dffb81749) }, /* 327 */
+    { UINT64_C(0xcd01dfb5ea23e319), UINT64_C(0x153931b1996012a0) }, /* 328 */
+    { UINT64_C(0x70ce4c91881cb5ae), UINT64_C(0x10fa8e27ade6754d) }, /* 329 */
+    { UINT64_C(0x1ae3adb5a69455e2), UINT64_C(0x1b2a7d0c4970bbaf) }, /* 330 */
+    { UINT64_C(0x7be957c4854377e8), UINT64_C(0x15bb973d078d62f2) }, /* 331 */
+    { UINT64_C(0xc987796a0435f987), UINT64_C(0x1162df64060ab58e) }, /* 332 */
+    { UINT64_C(0x75a58f1006bcc271), UINT64_C(0x1bd1656cd67788e4) }, /* 333 */
+    { UINT64_C(0xf7b7a5a66bca3527), UINT64_C(0x16411df0ab92d3e9) }, /* 334 */
+    { UINT64_C(0x5fc61e1ebca1c41f), UINT64_C(0x11cdb18d560f0fee) }, /* 335 */
+    { UINT64_C(0xffa363646102d365), UINT64_C(0x1c7c4f4889b1b316) }, /* 336 */
+    { UINT64_C(0x32e91c504d9bdc51), UINT64_C(0x16c9d906d48e28df) }, /* 337 */
+    { UINT64_C(0x8f20e37371497d0e), UINT64_C(0x123b140576d820b2) }, /* 338 */
+    { UINT64_C(0x7e9b0585820f2e7c), UINT64_C(0x1d2b533bf159cdea) }, /* 339 */
+    { UINT64_C(0xcbaf379e01a5beca), UINT64_C(0x1755dc2ff447d7ee) }, /* 340 */
+    { UINT64_C(0x0958f94b348498a1), UINT64_C(0x12ab168cc36cacbf) }, /* 341 */
+};
+
+static const uint64_t mt_ryu_pow5_split[326][2] = {
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1000000000000000) }, /* 0 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1400000000000000) }, /* 1 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1900000000000000) }, /* 2 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1f40000000000000) }, /* 3 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1388000000000000) }, /* 4 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x186a000000000000) }, /* 5 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1e84800000000000) }, /* 6 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1312d00000000000) }, /* 7 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x17d7840000000000) }, /* 8 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1dcd650000000000) }, /* 9 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x12a05f2000000000) }, /* 10 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x174876e800000000) }, /* 11 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1d1a94a200000000) }, /* 12 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x12309ce540000000) }, /* 13 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x16bcc41e90000000) }, /* 14 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1c6bf52634000000) }, /* 15 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x11c37937e0800000) }, /* 16 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x16345785d8a00000) }, /* 17 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1bc16d674ec80000) }, /* 18 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1158e460913d0000) }, /* 19 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x15af1d78b58c4000) }, /* 20 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1b1ae4d6e2ef5000) }, /* 21 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x10f0cf064dd59200) }, /* 22 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x152d02c7e14af680) }, /* 23 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x1a784379d99db420) }, /* 24 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x108b2a2c28029094) }, /* 25 */
+    { UINT64_C(0x0000000000000000), UINT64_C(0x14adf4b7320334b9) }, /* 26 */
+    { UINT64_C(0x4000000000000000), UINT64_C(0x19d971e4fe8401e7) }, /* 27 */
+    { UINT64_C(0x8800000000000000), UINT64_C(0x1027e72f1f128130) }, /* 28 */
+    { UINT64_C(0xaa00000000000000), UINT64_C(0x1431e0fae6d7217c) }, /* 29 */
+    { UINT64_C(0xd480000000000000), UINT64_C(0x193e5939a08ce9db) }, /* 30 */
+    { UINT64_C(0xc9a0000000000000), UINT64_C(0x1f8def8808b02452) }, /* 31 */
+    { UINT64_C(0xbe04000000000000), UINT64_C(0x13b8b5b5056e16b3) }, /* 32 */
+    { UINT64_C(0xad85000000000000), UINT64_C(0x18a6e32246c99c60) }, /* 33 */
+    { UINT64_C(0xd8e6400000000000), UINT64_C(0x1ed09bead87c0378) }, /* 34 */
+    { UINT64_C(0x878fe80000000000), UINT64_C(0x13426172c74d822b) }, /* 35 */
+    { UINT64_C(0x6973e20000000000), UINT64_C(0x1812f9cf7920e2b6) }, /* 36 */
+    { UINT64_C(0x03d0da8000000000), UINT64_C(0x1e17b84357691b64) }, /* 37 */
+    { UINT64_C(0x8262889000000000), UINT64_C(0x12ced32a16a1b11e) }, /* 38 */
+    { UINT64_C(0x22fb2ab400000000), UINT64_C(0x178287f49c4a1d66) }, /* 39 */
+    { UINT64_C(0xabb9f56100000000), UINT64_C(0x1d6329f1c35ca4bf) }, /* 40 */
+    { UINT64_C(0xcb54395ca0000000), UINT64_C(0x125dfa371a19e6f7) }, /* 41 */
+    { UINT64_C(0xbe2947b3c8000000), UINT64_C(0x16f578c4e0a060b5) }, /* 42 */
+    { UINT64_C(0x2db399a0ba000000), UINT64_C(0x1cb2d6f618c878e3) }, /* 43 */
+    { UINT64_C(0xfc90400474400000), UINT64_C(0x11efc659cf7d4b8d) }, /* 44 */
+    { UINT64_C(0x7bb4500591500000), UINT64_C(0x166bb7f0435c9e71) }, /* 45 */
+    { UINT64_C(0xdaa16406f5a40000), UINT64_C(0x1c06a5ec5433c60d) }, /* 46 */
+    { UINT64_C(0xa8a4de8459868000), UINT64_C(0x118427b3b4a05bc8) }, /* 47 */
+    { UINT64_C(0xd2ce16256fe82000), UINT64_C(0x15e531a0a1c872ba) }, /* 48 */
+    { UINT64_C(0x87819baecbe22800), UINT64_C(0x1b5e7e08ca3a8f69) }, /* 49 */
+    { UINT64_C(0xf4b1014d3f6d5900), UINT64_C(0x111b0ec57e6499a1) }, /* 50 */
+    { UINT64_C(0x71dd41a08f48af40), UINT64_C(0x1561d276ddfdc00a) }, /* 51 */
+    { UINT64_C(0x0e549208b31adb10), UINT64_C(0x1aba4714957d300d) }, /* 52 */
+    { UINT64_C(0x28f4db456ff0c8ea), UINT64_C(0x10b46c6cdd6e3e08) }, /* 53 */
+    { UINT64_C(0x33321216cbecfb24), UINT64_C(0x14e1878814c9cd8a) }, /* 54 */
+    { UINT64_C(0xbffe969c7ee839ed), UINT64_C(0x1a19e96a19fc40ec) }, /* 55 */
+    { UINT64_C(0xf7ff1e21cf512434), UINT64_C(0x105031e2503da893) }, /* 56 */
+    { UINT64_C(0xf5fee5aa43256d41), UINT64_C(0x14643e5ae44d12b8) }, /* 57 */
+    { UINT64_C(0x337e9f14d3eec892), UINT64_C(0x197d4df19d605767) }, /* 58 */
+    { UINT64_C(0x005e46da08ea7ab6), UINT64_C(0x1fdca16e04b86d41) }, /* 59 */
+    { UINT64_C(0xa03aec4845928cb2), UINT64_C(0x13e9e4e4c2f34448) }, /* 60 */
+    { UINT64_C(0xc849a75a56f72fde), UINT64_C(0x18e45e1df3b0155a) }, /* 61 */
+    { UINT64_C(0x7a5c1130ecb4fbd6), UINT64_C(0x1f1d75a5709c1ab1) }, /* 62 */
+    { UINT64_C(0xec798abe93f11d65), UINT64_C(0x13726987666190ae) }, /* 63 */
+    { UINT64_C(0xa797ed6e38ed64bf), UINT64_C(0x184f03e93ff9f4da) }, /* 64 */
+    { UINT64_C(0x517de8c9c728bdef), UINT64_C(0x1e62c4e38ff87211) }, /* 65 */
+    { UINT64_C(0xd2eeb17e1c7976b5), UINT64_C(0x12fdbb0e39fb474a) }, /* 66 */
+    { UINT64_C(0x87aa5ddda397d462), UINT64_C(0x17bd29d1c87a191d) }, /* 67 */
+    { UINT64_C(0xe994f5550c7dc97b), UINT64_C(0x1dac74463a989f64) }, /* 68 */
+    { UINT64_C(0x11fd195527ce9ded), UINT64_C(0x128bc8abe49f639f) }, /* 69 */
+    { UINT64_C(0xd67c5faa71c24568), UINT64_C(0x172ebad6ddc73c86) }, /* 70 */
+    { UINT64_C(0x8c1b77950e32d6c2), UINT64_C(0x1cfa698c95390ba8) }, /* 71 */
+    { UINT64_C(0x57912abd28dfc639), UINT64_C(0x121c81f7dd43a749) }, /* 72 */
+    { UINT64_C(0xad75756c7317b7c8), UINT64_C(0x16a3a275d494911b) }, /* 73 */
+    { UINT64_C(0x98d2d2c78fdda5ba), UINT64_C(0x1c4c8b1349b9b562) }, /* 74 */
+    { UINT64_C(0x9f83c3bcb9ea8794), UINT64_C(0x11afd6ec0e14115d) }, /* 75 */
+    { UINT64_C(0x0764b4abe8652979), UINT64_C(0x161bcca7119915b5) }, /* 76 */
+    { UINT64_C(0x493de1d6e27e73d7), UINT64_C(0x1ba2bfd0d5ff5b22) }, /* 77 */
+    { UINT64_C(0x6dc6ad264d8f0866), UINT64_C(0x1145b7e285bf98f5) }, /* 78 */
+    { UINT64_C(0xc938586fe0f2ca80), UINT64_C(0x159725db272f7f32) }, /* 79 */
+    { UINT64_C(0x7b866e8bd92f7d20), UINT64_C(0x1afcef51f0fb5eff) }, /* 80 */
+    { UINT64_C(0xad34051767bdae34), UINT64_C(0x10de1593369d1b5f) }, /* 81 */
+    { UINT64_C(0x9881065d41ad19c1), UINT64_C(0x15159af804446237) }, /* 82 */
+    { UINT64_C(0x7ea147f492186032), UINT64_C(0x1a5b01b605557ac5) }, /* 83 */
+    { UINT64_C(0x6f24ccf8db4f3c1f), UINT64_C(0x1078e111c3556cbb) }, /* 84 */
+    { UINT64_C(0x4aee003712230b27), UINT64_C(0x14971956342ac7ea) }, /* 85 */
+    { UINT64_C(0xdda98044d6abcdf0), UINT64_C(0x19bcdfabc13579e4) }, /* 86 */
+    { UINT64_C(0x0a89f02b062b60b6), UINT64_C(0x10160bcb58c16c2f) }, /* 87 */
+    { UINT64_C(0xcd2c6c35c7b638e4), UINT64_C(0x141b8ebe2ef1c73a) }, /* 88 */
+    { UINT64_C(0x8077874339a3c71d), UINT64_C(0x1922726dbaae3909) }, /* 89 */
+    { UINT64_C(0xe0956914080cb8e4), UINT64_C(0x1f6b0f092959c74b) }, /* 90 */
+    { UINT64_C(0x6c5d61ac8507f38e), UINT64_C(0x13a2e965b9d81c8f) }, /* 91 */
+    { UINT64_C(0x4774ba17a649f072), UINT64_C(0x188ba3bf284e23b3) }, /* 92 */
+    { UINT64_C(0x1951e89d8fdc6c8f), UINT64_C(0x1eae8caef261aca0) }, /* 93 */
+    { UINT64_C(0x0fd3316279e9c3d9), UINT64_C(0x132d17ed577d0be4) }, /* 94 */
+    { UINT64_C(0x13c7fdbb186434cf), UINT64_C(0x17f85de8ad5c4edd) }, /* 95 */
+    { UINT64_C(0x58b9fd29de7d4203), UINT64_C(0x1df67562d8b36294) }, /* 96 */
+    { UINT64_C(0xb7743e3a2b0e4942), UINT64_C(0x12ba095dc7701d9c) }, /* 97 */
+    { UINT64_C(0xe5514dc8b5d1db92), UINT64_C(0x17688bb5394c2503) }, /* 98 */
+    { UINT64_C(0xdea5a13ae3465277), UINT64_C(0x1d42aea2879f2e44) }, /* 99 */
+    { UINT64_C(0x0b2784c4ce0bf38a), UINT64_C(0x1249ad2594c37ceb) }, /* 100 */
+    { UINT64_C(0xcdf165f6018ef06d), UINT64_C(0x16dc186ef9f45c25) }, /* 101 */
+    { UINT64_C(0x416dbf7381f2ac88), UINT64_C(0x1c931e8ab871732f) }, /* 102 */
+    { UINT64_C(0x88e497a83137abd5), UINT64_C(0x11dbf316b346e7fd) }, /* 103 */
+    { UINT64_C(0xeb1dbd923d8596ca), UINT64_C(0x1652efdc6018a1fc) }, /* 104 */
+    { UINT64_C(0x25e52cf6cce6fc7d), UINT64_C(0x1be7abd3781eca7c) }, /* 105 */
+    { UINT64_C(0x97af3c1a40105dce), UINT64_C(0x1170cb642b133e8d) }, /* 106 */
+    { UINT64_C(0xfd9b0b20d0147542), UINT64_C(0x15ccfe3d35d80e30) }, /* 107 */
+    { UINT64_C(0x3d01cde904199292), UINT64_C(0x1b403dcc834e11bd) }, /* 108 */
+    { UINT64_C(0x462120b1a28ffb9b), UINT64_C(0x1108269fd210cb16) }, /* 109 */
+    { UINT64_C(0xd7a968de0b33fa82), UINT64_C(0x154a3047c694fddb) }, /* 110 */
+    { UINT64_C(0xcd93c3158e00f923), UINT64_C(0x1a9cbc59b83a3d52) }, /* 111 */
+    { UINT64_C(0xc07c59ed78c09bb6), UINT64_C(0x10a1f5b813246653) }, /* 112 */
+    { UINT64_C(0xb09b7068d6f0c2a3), UINT64_C(0x14ca732617ed7fe8) }, /* 113 */
+    { UINT64_C(0xdcc24c830cacf34c), UINT64_C(0x19fd0fef9de8dfe2) }, /* 114 */
+    { UINT64_C(0xc9f96fd1e7ec180f), UINT64_C(0x103e29f5c2b18bed) }, /* 115 */
+    { UINT64_C(0x3c77cbc661e71e13), UINT64_C(0x144db473335deee9) }, /* 116 */
+    { UINT64_C(0x8b95beb7fa60e598), UINT64_C(0x1961219000356aa3) }, /* 117 */
+    { UINT64_C(0x6e7b2e65f8f91efe), UINT64_C(0x1fb969f40042c54c) }, /* 118 */
+    { UINT64_C(0xc50cfcffbb9bb35f), UINT64_C(0x13d3e2388029bb4f) }, /* 119 */
+    { UINT64_C(0xb6503c3faa82a037), UINT64_C(0x18c8dac6a0342a23) }, /* 120 */
+    { UINT64_C(0xa3e44b4f95234844), UINT64_C(0x1efb1178484134ac) }, /* 121 */
+    { UINT64_C(0xe66eaf11bd360d2b), UINT64_C(0x135ceaeb2d28c0eb) }, /* 122 */
+    { UINT64_C(0xe00a5ad62c839075), UINT64_C(0x183425a5f872f126) }, /* 123 */
+    { UINT64_C(0x980cf18bb7a47493), UINT64_C(0x1e412f0f768fad70) }, /* 124 */
+    { UINT64_C(0x5f0816f752c6c8dc), UINT64_C(0x12e8bd69aa19cc66) }, /* 125 */
+    { UINT64_C(0xf6ca1cb527787b13), UINT64_C(0x17a2ecc414a03f7f) }, /* 126 */
+    { UINT64_C(0xf47ca3e2715699d7), UINT64_C(0x1d8ba7f519c84f5f) }, /* 127 */
+    { UINT64_C(0xf8cde66d86d62026), UINT64_C(0x127748f9301d319b) }, /* 128 */
+    { UINT64_C(0xf7016008e88ba830), UINT64_C(0x17151b377c247e02) }, /* 129 */
+    { UINT64_C(0xb4c1b80b22ae923c), UINT64_C(0x1cda62055b2d9d83) }, /* 130 */
+    { UINT64_C(0x50f91306f5ad1b65), UINT64_C(0x12087d4358fc8272) }, /* 131 */
+    { UINT64_C(0xe53757c8b318623f), UINT64_C(0x168a9c942f3ba30e) }, /* 132 */
+    { UINT64_C(0x9e852dbadfde7acf), UINT64_C(0x1c2d43b93b0a8bd2) }, /* 133 */
+    { UINT64_C(0xa3133c94cbeb0cc1), UINT64_C(0x119c4a53c4e69763) }, /* 134 */
+    { UINT64_C(0x8bd80bb9fee5cff1), UINT64_C(0x16035ce8b6203d3c) }, /* 135 */
+    { UINT64_C(0xaece0ea87e9f43ee), UINT64_C(0x1b843422e3a84c8b) }, /* 136 */
+    { UINT64_C(0x4d40c9294f238a75), UINT64_C(0x1132a095ce492fd7) }, /* 137 */
+    { UINT64_C(0x2090fb73a2ec6d12), UINT64_C(0x157f48bb41db7bcd) }, /* 138 */
+    { UINT64_C(0x68b53a508ba78856), UINT64_C(0x1adf1aea12525ac0) }, /* 139 */
+    { UINT64_C(0x417144725748b536), UINT64_C(0x10cb70d24b7378b8) }, /* 140 */
+    { UINT64_C(0x51cd958eed1ae283), UINT64_C(0x14fe4d06de5056e6) }, /* 141 */
+    { UINT64_C(0xe640faf2a8619b24), UINT64_C(0x1a3de04895e46c9f) }, /* 142 */
+    { UINT64_C(0xefe89cd7a93d00f7), UINT64_C(0x1066ac2d5daec3e3) }, /* 143 */
+    { UINT64_C(0xebe2c40d938c4134), UINT64_C(0x14805738b51a74dc) }, /* 144 */
+    { UINT64_C(0x26db7510f86f5181), UINT64_C(0x19a06d06e2611214) }, /* 145 */
+    { UINT64_C(0x9849292a9b4592f1), UINT64_C(0x100444244d7cab4c) }, /* 146 */
+    { UINT64_C(0xbe5b73754216f7ad), UINT64_C(0x1405552d60dbd61f) }, /* 147 */
+    { UINT64_C(0xadf25052929cb598), UINT64_C(0x1906aa78b912cba7) }, /* 148 */
+    { UINT64_C(0x996ee4673743e2ff), UINT64_C(0x1f485516e7577e91) }, /* 149 */
+    { UINT64_C(0xffe54ec0828a6ddf), UINT64_C(0x138d352e5096af1a) }, /* 150 */
+    { UINT64_C(0xbfdea270a32d0957), UINT64_C(0x18708279e4bc5ae1) }, /* 151 */
+    { UINT64_C(0x2fd64b0ccbf84bad), UINT64_C(0x1e8ca3185deb719a) }, /* 152 */
+    { UINT64_C(0x5de5eee7ff7b2f4c), UINT64_C(0x1317e5ef3ab32700) }, /* 153 */
+    { UINT64_C(0x755f6aa1ff59fb1f), UINT64_C(0x17dddf6b095ff0c0) }, /* 154 */
+    { UINT64_C(0x92b7454a7f3079e7), UINT64_C(0x1dd55745cbb7ecf0) }, /* 155 */
+    { UINT64_C(0x5bb28b4e8f7e4c30), UINT64_C(0x12a5568b9f52f416) }, /* 156 */
+    { UINT64_C(0xf29f2e22335ddf3c), UINT64_C(0x174eac2e8727b11b) }, /* 157 */
+    { UINT64_C(0xef46f9aac035570b), UINT64_C(0x1d22573a28f19d62) }, /* 158 */
+    { UINT64_C(0xd58c5c0ab8215667), UINT64_C(0x123576845997025d) }, /* 159 */
+    { UINT64_C(0x4aef730d6629ac01), UINT64_C(0x16c2d4256ffcc2f5) }, /* 160 */
+    { UINT64_C(0x9dab4fd0bfb41701), UINT64_C(0x1c73892ecbfbf3b2) }, /* 161 */
+    { UINT64_C(0xa28b11e277d08e60), UINT64_C(0x11c835bd3f7d784f) }, /* 162 */
+    { UINT64_C(0x8b2dd65b15c4b1f9), UINT64_C(0x163a432c8f5cd663) }, /* 163 */
+    { UINT64_C(0x6df94bf1db35de77), UINT64_C(0x1bc8d3f7b3340bfc) }, /* 164 */
+    { UINT64_C(0xc4bbcf772901ab0a), UINT64_C(0x115d847ad000877d) }, /* 165 */
+    { UINT64_C(0x35eac354f34215cd), UINT64_C(0x15b4e5998400a95d) }, /* 166 */
+    { UINT64_C(0x8365742a30129b40), UINT64_C(0x1b221effe500d3b4) }, /* 167 */
+    { UINT64_C(0xd21f689a5e0ba108), UINT64_C(0x10f5535fef208450) }, /* 168 */
+    { UINT64_C(0x06a742c0f58e894a), UINT64_C(0x1532a837eae8a565) }, /* 169 */
+    { UINT64_C(0x4851137132f22b9d), UINT64_C(0x1a7f5245e5a2cebe) }, /* 170 */
+    { UINT64_C(0xed32ac26bfd75b42), UINT64_C(0x108f936baf85c136) }, /* 171 */
+    { UINT64_C(0xa87f57306fcd3212), UINT64_C(0x14b378469b673184) }, /* 172 */
+    { UINT64_C(0xd29f2cfc8bc07e97), UINT64_C(0x19e056584240fde5) }, /* 173 */
+    { UINT64_C(0xa3a37c1dd7584f1e), UINT64_C(0x102c35f729689eaf) }, /* 174 */
+    { UINT64_C(0x8c8c5b254d2e62e6), UINT64_C(0x14374374f3c2c65b) }, /* 175 */
+    { UINT64_C(0x6faf71eea079fb9f), UINT64_C(0x1945145230b377f2) }, /* 176 */
+    { UINT64_C(0x0b9b4e6a48987a87), UINT64_C(0x1f965966bce055ef) }, /* 177 */
+    { UINT64_C(0x674111026d5f4c94), UINT64_C(0x13bdf7e0360c35b5) }, /* 178 */
+    { UINT64_C(0xc111554308b71fba), UINT64_C(0x18ad75d8438f4322) }, /* 179 */
+    { UINT64_C(0x7155aa93cae4e7a8), UINT64_C(0x1ed8d34e547313eb) }, /* 180 */
+    { UINT64_C(0x26d58a9c5ecf10c9), UINT64_C(0x13478410f4c7ec73) }, /* 181 */
+    { UINT64_C(0xf08aed437682d4fb), UINT64_C(0x1819651531f9e78f) }, /* 182 */
+    { UINT64_C(0xecada89454238a3a), UINT64_C(0x1e1fbe5a7e786173) }, /* 183 */
+    { UINT64_C(0x73ec895cb4963664), UINT64_C(0x12d3d6f88f0b3ce8) }, /* 184 */
+    { UINT64_C(0x90e7abb3e1bbc3fd), UINT64_C(0x1788ccb6b2ce0c22) }, /* 185 */
+    { UINT64_C(0x352196a0da2ab4fd), UINT64_C(0x1d6affe45f818f2b) }, /* 186 */
+    { UINT64_C(0x0134fe24885ab11e), UINT64_C(0x1262dfeebbb0f97b) }, /* 187 */
+    { UINT64_C(0xc1823dadaa715d65), UINT64_C(0x16fb97ea6a9d37d9) }, /* 188 */
+    { UINT64_C(0x31e2cd19150db4bf), UINT64_C(0x1cba7de5054485d0) }, /* 189 */
+    { UINT64_C(0x1f2dc02fad2890f7), UINT64_C(0x11f48eaf234ad3a2) }, /* 190 */
+    { UINT64_C(0xa6f9303b9872b535), UINT64_C(0x1671b25aec1d888a) }, /* 191 */
+    { UINT64_C(0x50b77c4a7e8f6282), UINT64_C(0x1c0e1ef1a724eaad) }, /* 192 */
+    { UINT64_C(0x5272adae8f199d91), UINT64_C(0x1188d357087712ac) }, /* 193 */
+    { UINT64_C(0x670f591a32e004f6), UINT64_C(0x15eb082cca94d757) }, /* 194 */
+    { UINT64_C(0x40d32f60bf980633), UINT64_C(0x1b65ca37fd3a0d2d) }, /* 195 */
+    { UINT64_C(0x4883fd9c77bf03e0), UINT64_C(0x111f9e62fe44483c) }, /* 196 */
+    { UINT64_C(0x5aa4fd0395aec4d8), UINT64_C(0x156785fbbdd55a4b) }, /* 197 */
+    { UINT64_C(0x314e3c447b1a760e), UINT64_C(0x1ac1677aad4ab0de) }, /* 198 */
+    { UINT64_C(0xded0e5aaccf089c9), UINT64_C(0x10b8e0acac4eae8a) }, /* 199 */
+    { UINT64_C(0x96851f15802cac3b), UINT64_C(0x14e718d7d7625a2d) }, /* 200 */
+    { UINT64_C(0xfc2666dae037d74a), UINT64_C(0x1a20df0dcd3af0b8) }, /* 201 */
+    { UINT64_C(0x9d980048cc22e68e), UINT64_C(0x10548b68a044d673) }, /* 202 */
+    { UINT64_C(0x84fe005aff2ba032), UINT64_C(0x1469ae42c8560c10) }, /* 203 */
+    { UINT64_C(0xa63d8071bef6883e), UINT64_C(0x198419d37a6b8f14) }, /* 204 */
+    { UINT64_C(0xcfcce08e2eb42a4e), UINT64_C(0x1fe52048590672d9) }, /* 205 */
+    { UINT64_C(0x21e00c58dd309a70), UINT64_C(0x13ef342d37a407c8) }, /* 206 */
+    { UINT64_C(0x2a580f6f147cc10d), UINT64_C(0x18eb0138858d09ba) }, /* 207 */
+    { UINT64_C(0xb4ee134ad99bf150), UINT64_C(0x1f25c186a6f04c28) }, /* 208 */
+    { UINT64_C(0x7114cc0ec80176d2), UINT64_C(0x137798f428562f99) }, /* 209 */
+    { UINT64_C(0xcd59ff127a01d486), UINT64_C(0x18557f31326bbb7f) }, /* 210 */
+    { UINT64_C(0xc0b07ed7188249a8), UINT64_C(0x1e6adefd7f06aa5f) }, /* 211 */
+    { UINT64_C(0xd86e4f466f516e09), UINT64_C(0x1302cb5e6f642a7b) }, /* 212 */
+    { UINT64_C(0xce89e3180b25c98b), UINT64_C(0x17c37e360b3d351a) }, /* 213 */
+    { UINT64_C(0x822c5bde0def3bee), UINT64_C(0x1db45dc38e0c8261) }, /* 214 */
+    { UINT64_C(0xf15bb96ac8b58575), UINT64_C(0x1290ba9a38c7d17c) }, /* 215 */
+    { UINT64_C(0x2db2a7c57ae2e6d2), UINT64_C(0x1734e940c6f9c5dc) }, /* 216 */
+    { UINT64_C(0x391f51b6d99ba086), UINT64_C(0x1d022390f8b83753) }, /* 217 */
+    { UINT64_C(0x03b3931248014454), UINT64_C(0x1221563a9b732294) }, /* 218 */
+    { UINT64_C(0x04a077d6da019569), UINT64_C(0x16a9abc9424feb39) }, /* 219 */
+    { UINT64_C(0x45c895cc9081fac3), UINT64_C(0x1c5416bb92e3e607) }, /* 220 */
+    { UINT64_C(0x8b9d5d9fda513cba), UINT64_C(0x11b48e353bce6fc4) }, /* 221 */
+    { UINT64_C(0xae84b507d0e58be8), UINT64_C(0x1621b1c28ac20bb5) }, /* 222 */
+    { UINT64_C(0x1a25e249c51eeee3), UINT64_C(0x1baa1e332d728ea3) }, /* 223 */
+    { UINT64_C(0xf057ad6e1b33554d), UINT64_C(0x114a52dffc679925) }, /* 224 */
+    { UINT64_C(0x6c6d98c9a2002aa1), UINT64_C(0x159ce797fb817f6f) }, /* 225 */
+    { UINT64_C(0x4788fefc0a803549), UINT64_C(0x1b04217dfa61df4b) }, /* 226 */
+    { UINT64_C(0x0cb59f5d8690214e), UINT64_C(0x10e294eebc7d2b8f) }, /* 227 */
+    { UINT64_C(0xcfe30734e83429a1), UINT64_C(0x151b3a2a6b9c7672) }, /* 228 */
+    { UINT64_C(0x83dbc9022241340a), UINT64_C(0x1a6208b50683940f) }, /* 229 */
+    { UINT64_C(0xb2695da15568c086), UINT64_C(0x107d457124123c89) }, /* 230 */
+    { UINT64_C(0x1f03b509aac2f0a7), UINT64_C(0x149c96cd6d16cbac) }, /* 231 */
+    { UINT64_C(0x26c4a24c1573acd1), UINT64_C(0x19c3bc80c85c7e97) }, /* 232 */
+    { UINT64_C(0x783ae56f8d684c03), UINT64_C(0x101a55d07d39cf1e) }, /* 233 */
+    { UINT64_C(0x16499ecb70c25f03), UINT64_C(0x1420eb449c8842e6) }, /* 234 */
+    { UINT64_C(0x9bdc067e4cf2f6c4), UINT64_C(0x19292615c3aa539f) }, /* 235 */
+    { UINT64_C(0x82d3081de02fb476), UINT64_C(0x1f736f9b3494e887) }, /* 236 */
+    { UINT64_C(0xb1c3e512ac1dd0c9), UINT64_C(0x13a825c100dd1154) }, /* 237 */
+    { UINT64_C(0xde34de57572544fc), UINT64_C(0x18922f31411455a9) }, /* 238 */
+    { UINT64_C(0x55c215ed2cee963b), UINT64_C(0x1eb6bafd91596b14) }, /* 239 */
+    { UINT64_C(0xb5994db43c151de5), UINT64_C(0x133234de7ad7e2ec) }, /* 240 */
+    { UINT64_C(0xe2ffa1214b1a655e), UINT64_C(0x17fec216198ddba7) }, /* 241 */
+    { UINT64_C(0xdbbf89699de0feb6), UINT64_C(0x1dfe729b9ff15291) }, /* 242 */
+    { UINT64_C(0x2957b5e202ac9f31), UINT64_C(0x12bf07a143f6d39b) }, /* 243 */
+    { UINT64_C(0xf3ada35a8357c6fe), UINT64_C(0x176ec98994f48881) }, /* 244 */
+    { UINT64_C(0x70990c31242db8bd), UINT64_C(0x1d4a7bebfa31aaa2) }, /* 245 */
+    { UINT64_C(0x865fa79eb69c9376), UINT64_C(0x124e8d737c5f0aa5) }, /* 246 */
+    { UINT64_C(0xe7f791866443b854), UINT64_C(0x16e230d05b76cd4e) }, /* 247 */
+    { UINT64_C(0xa1f575e7fd54a669), UINT64_C(0x1c9abd04725480a2) }, /* 248 */
+    { UINT64_C(0xa53969b0fe54e801), UINT64_C(0x11e0b622c774d065) }, /* 249 */
+    { UINT64_C(0x0e87c41d3dea2202), UINT64_C(0x1658e3ab7952047f) }, /* 250 */
+    { UINT64_C(0xd229b5248d64aa82), UINT64_C(0x1bef1c9657a6859e) }, /* 251 */
+    { UINT64_C(0x435a1136d85eea91), UINT64_C(0x117571ddf6c81383) }, /* 252 */
+    { UINT64_C(0x143095848e76a536), UINT64_C(0x15d2ce55747a1864) }, /* 253 */
+    { UINT64_C(0x193cbae5b2144e83), UINT64_C(0x1b4781ead1989e7d) }, /* 254 */
+    { UINT64_C(0x2fc5f4cf8f4cb112), UINT64_C(0x110cb132c2ff630e) }, /* 255 */
+    { UINT64_C(0xbbb77203731fdd56), UINT64_C(0x154fdd7f73bf3bd1) }, /* 256 */
+    { UINT64_C(0x2aa54e844fe7d4ac), UINT64_C(0x1aa3d4df50af0ac6) }, /* 257 */
+    { UINT64_C(0xdaa75112b1f0e4eb), UINT64_C(0x10a6650b926d66bb) }, /* 258 */
+    { UINT64_C(0xd15125575e6d1e26), UINT64_C(0x14cffe4e7708c06a) }, /* 259 */
+    { UINT64_C(0x85a56ead360865b0), UINT64_C(0x1a03fde214caf085) }, /* 260 */
+    { UINT64_C(0x7387652c41c53f8e), UINT64_C(0x10427ead4cfed653) }, /* 261 */
+    { UINT64_C(0x50693e7752368f71), UINT64_C(0x14531e58a03e8be8) }, /* 262 */
+    { UINT64_C(0x64838e1526c4334e), UINT64_C(0x1967e5eec84e2ee2) }, /* 263 */
+    { UINT64_C(0xfda4719a70754022), UINT64_C(0x1fc1df6a7a61ba9a) }, /* 264 */
+    { UINT64_C(0xde86c70086494815), UINT64_C(0x13d92ba28c7d14a0) }, /* 265 */
+    { UINT64_C(0x162878c0a7db9a1a), UINT64_C(0x18cf768b2f9c59c9) }, /* 266 */
+    { UINT64_C(0x5bb296f0d1d280a1), UINT64_C(0x1f03542dfb83703b) }, /* 267 */
+    { UINT64_C(0x194f9e5683239064), UINT64_C(0x1362149cbd322625) }, /* 268 */
+    { UINT64_C(0x5fa385ec23ec747e), UINT64_C(0x183a99c3ec7eafae) }, /* 269 */
+    { UINT64_C(0xf78c67672ce7919d), UINT64_C(0x1e494034e79e5b99) }, /* 270 */
+    { UINT64_C(0x3ab7c0a07c10bb02), UINT64_C(0x12edc82110c2f940) }, /* 271 */
+    { UINT64_C(0x4965b0c89b14e9c3), UINT64_C(0x17a93a2954f3b790) }, /* 272 */
+    { UINT64_C(0x5bbf1cfac1da2433), UINT64_C(0x1d9388b3aa30a574) }, /* 273 */
+    { UINT64_C(0xb957721cb92856a0), UINT64_C(0x127c35704a5e6768) }, /* 274 */
+    { UINT64_C(0xe7ad4ea3e7726c48), UINT64_C(0x171b42cc5cf60142) }, /* 275 */
+    { UINT64_C(0xa198a24ce14f075a), UINT64_C(0x1ce2137f74338193) }, /* 276 */
+    { UINT64_C(0x44ff65700cd16498), UINT64_C(0x120d4c2fa8a030fc) }, /* 277 */
+    { UINT64_C(0x563f3ecc1005bdbe), UINT64_C(0x16909f3b92c83d3b) }, /* 278 */
+    { UINT64_C(0x2bcf0e7f14072d2e), UINT64_C(0x1c34c70a777a4c8a) }, /* 279 */
+    { UINT64_C(0x5b61690f6c847c3d), UINT64_C(0x11a0fc668aac6fd6) }, /* 280 */
+    { UINT64_C(0xf239c35347a59b4c), UINT64_C(0x16093b802d578bcb) }, /* 281 */
+    { UINT64_C(0xeec83428198f021f), UINT64_C(0x1b8b8a6038ad6ebe) }, /* 282 */
+    { UINT64_C(0x553d20990ff96153), UINT64_C(0x1137367c236c6537) }, /* 283 */
+    { UINT64_C(0x2a8c68bf53f7b9a8), UINT64_C(0x1585041b2c477e85) }, /* 284 */
+    { UINT64_C(0x752f82ef28f5a812), UINT64_C(0x1ae64521f7595e26) }, /* 285 */
+    { UINT64_C(0x093db1d57999890b), UINT64_C(0x10cfeb353a97dad8) }, /* 286 */
+    { UINT64_C(0x0b8d1e4ad7ffeb4e), UINT64_C(0x1503e602893dd18e) }, /* 287 */
+    { UINT64_C(0x8e7065dd8dffe622), UINT64_C(0x1a44df832b8d45f1) }, /* 288 */
+    { UINT64_C(0xf9063faa78bfefd5), UINT64_C(0x106b0bb1fb384bb6) }, /* 289 */
+    { UINT64_C(0xb747cf9516efebca), UINT64_C(0x1485ce9e7a065ea4) }, /* 290 */
+    { UINT64_C(0xe519c37a5cabe6bd), UINT64_C(0x19a742461887f64d) }, /* 291 */
+    { UINT64_C(0xaf301a2c79eb7036), UINT64_C(0x1008896bcf54f9f0) }, /* 292 */
+    { UINT64_C(0xdafc20b798664c43), UINT64_C(0x140aabc6c32a386c) }, /* 293 */
+    { UINT64_C(0x11bb28e57e7fdf54), UINT64_C(0x190d56b873f4c688) }, /* 294 */
+    { UINT64_C(0x1629f31ede1fd72a), UINT64_C(0x1f50ac6690f1f82a) }, /* 295 */
+    { UINT64_C(0x4dda37f34ad3e67a), UINT64_C(0x13926bc01a973b1a) }, /* 296 */
+    { UINT64_C(0xe150c5f01d88e019), UINT64_C(0x187706b0213d09e0) }, /* 297 */
+    { UINT64_C(0x19a4f76c24eb181f), UINT64_C(0x1e94c85c298c4c59) }, /* 298 */
+    { UINT64_C(0xb0071aa39712ef13), UINT64_C(0x131cfd3999f7afb7) }, /* 299 */
+    { UINT64_C(0x9c08e14c7cd7aad8), UINT64_C(0x17e43c8800759ba5) }, /* 300 */
+    { UINT64_C(0x030b199f9c0d958e), UINT64_C(0x1ddd4baa0093028f) }, /* 301 */
+    { UINT64_C(0x61e6f003c1887d79), UINT64_C(0x12aa4f4a405be199) }, /* 302 */
+    { UINT64_C(0xba60ac04b1ea9cd7), UINT64_C(0x1754e31cd072d9ff) }, /* 303 */
+    { UINT64_C(0xa8f8d705de65440d), UINT64_C(0x1d2a1be4048f907f) }, /* 304 */
+    { UINT64_C(0xc99b8663aaff4a88), UINT64_C(0x123a516e82d9ba4f) }, /* 305 */
+    { UINT64_C(0xbc0267fc95bf1d2a), UINT64_C(0x16c8e5ca239028e3) }, /* 306 */
+    { UINT64_C(0xab0301fbbb2ee474), UINT64_C(0x1c7b1f3cac74331c) }, /* 307 */
+    { UINT64_C(0xeae1e13d54fd4ec9), UINT64_C(0x11ccf385ebc89ff1) }, /* 308 */
+    { UINT64_C(0x659a598caa3ca27b), UINT64_C(0x1640306766bac7ee) }, /* 309 */
+    { UINT64_C(0xff00efefd4cbcb1a), UINT64_C(0x1bd03c81406979e9) }, /* 310 */
+    { UINT64_C(0x3f6095f5e4ff5ef0), UINT64_C(0x116225d0c841ec32) }, /* 311 */
+    { UINT64_C(0xcf38bb735e3f36ac), UINT64_C(0x15baaf44fa52673e) }, /* 312 */
+    { UINT64_C(0x8306ea5035cf0457), UINT64_C(0x1b295b1638e7010e) }, /* 313 */
+    { UINT64_C(0x11e4527221a162b6), UINT64_C(0x10f9d8ede39060a9) }, /* 314 */
+    { UINT64_C(0x565d670eaa09bb64), UINT64_C(0x15384f295c7478d3) }, /* 315 */
+    { UINT64_C(0x2bf4c0d2548c2a3d), UINT64_C(0x1a8662f3b3919708) }, /* 316 */
+    { UINT64_C(0x1b78f88374d79a66), UINT64_C(0x1093fdd8503afe65) }, /* 317 */
+    { UINT64_C(0x625736a4520d8100), UINT64_C(0x14b8fd4e6449bdfe) }, /* 318 */
+    { UINT64_C(0xfaed044d6690e140), UINT64_C(0x19e73ca1fd5c2d7d) }, /* 319 */
+    { UINT64_C(0xbcd422b0601a8cc8), UINT64_C(0x103085e53e599c6e) }, /* 320 */
+    { UINT64_C(0x6c092b5c78212ffa), UINT64_C(0x143ca75e8df0038a) }, /* 321 */
+    { UINT64_C(0x070b763396297bf8), UINT64_C(0x194bd136316c046d) }, /* 322 */
+    { UINT64_C(0x48ce53c07bb3daf6), UINT64_C(0x1f9ec583bdc70588) }, /* 323 */
+    { UINT64_C(0x2d80f4584d5068da), UINT64_C(0x13c33b72569c6375) }, /* 324 */
+    { UINT64_C(0x78e1316e60a48310), UINT64_C(0x18b40a4eec437c52) }, /* 325 */
+};
+
+static inline uint32_t
+mt_ryu_pow5bits(int32_t e)
+{
+    return (uint32_t)((((uint32_t)e * 1217359u) >> 19) + 1u);
+}
+
+static inline int32_t
+mt_ryu_log10_pow2(int32_t e)
+{
+    return (int32_t)(((uint32_t)e * 78913u) >> 18);
+}
+
+static inline int32_t
+mt_ryu_log10_pow5(int32_t e)
+{
+    return (int32_t)(((uint32_t)e * 732923u) >> 20);
+}
+
+static inline uint32_t
+mt_ryu_pow5factor_64(uint64_t value)
+{
+    uint32_t count = 0;
+    for (;;) {
+        uint64_t q = value / 5u;
+        uint64_t r = value % 5u;
+        if (r != 0) break;
+        value = q;
+        count++;
+    }
+    return count;
+}
+
+static inline int
+mt_ryu_multiple_of_pow5(uint64_t value, uint32_t p)
+{
+    return mt_ryu_pow5factor_64(value) >= p;
+}
+
+static inline int
+mt_ryu_multiple_of_pow2(uint64_t value, uint32_t p)
+{
+    if (p >= 64) return value == 0;
+    return (value & ((UINT64_C(1) << p) - 1u)) == 0;
+}
+
+static inline uint64_t
+mt_ryu_umul128(uint64_t a, uint64_t b, uint64_t *hi)
+{
+#ifdef __SIZEOF_INT128__
+    __extension__ unsigned __int128 p =
+        (__extension__ (unsigned __int128)a) * b;
+    *hi = (uint64_t)(p >> 64);
+    return (uint64_t)p;
+#else
+    uint64_t a_lo = (uint32_t)a, a_hi = a >> 32;
+    uint64_t b_lo = (uint32_t)b, b_hi = b >> 32;
+    uint64_t p00 = a_lo * b_lo;
+    uint64_t p01 = a_lo * b_hi;
+    uint64_t p10 = a_hi * b_lo;
+    uint64_t p11 = a_hi * b_hi;
+    uint64_t mid = (p00 >> 32) + (uint32_t)p01 + (uint32_t)p10;
+    *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return (p00 & UINT64_C(0xffffffff)) | (mid << 32);
+#endif
+}
+
+static inline uint64_t
+mt_ryu_shiftright128(uint64_t lo, uint64_t hi, uint32_t dist)
+{
+    return (hi << (64u - dist)) | (lo >> dist);
+}
+
+static inline uint64_t
+mt_ryu_mulshift64(uint64_t m, const uint64_t *mul, int32_t j)
+{
+    uint64_t high0, high1;
+    uint64_t low1 = mt_ryu_umul128(m, mul[1], &high1);
+    (void)mt_ryu_umul128(m, mul[0], &high0);
+    uint64_t sum = high0 + low1;
+    if (sum < high0)
+        high1++;
+    return mt_ryu_shiftright128(sum, high1, (uint32_t)(j - 64));
+}
+
+static inline uint64_t
+mt_ryu_mulshift_all64(uint64_t m, const uint64_t *mul, int32_t j,
+                      uint64_t *vp, uint64_t *vm, uint32_t mmShift)
+{
+    *vp = mt_ryu_mulshift64(4u * m + 2u, mul, j);
+    *vm = mt_ryu_mulshift64(4u * m - 1u - mmShift, mul, j);
+    return mt_ryu_mulshift64(4u * m, mul, j);
+}
+
+/*
+ * Format IEEE-754 binary64 into buf (at least 32 bytes) using Ryu shortest
+ * round-trip representation. Returns number of bytes written (excluding NUL).
+ */
+static size_t
+mt_ryu_d2s(double d, char *buf, size_t bufsize)
+{
+    if (bufsize < 32) return 0;
+
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+
+    int sign = (int)(bits >> 63);
+    uint32_t ieee_exp = (uint32_t)((bits >> 52) & 0x7ffu);
+    uint64_t ieee_mant = bits & UINT64_C(0x000fffffffffffff);
+
+    /* Special values. */
+    if (ieee_exp == 0x7ffu) {
+        if (ieee_mant != 0) {
+            memcpy(buf, "NaN", 4);
+            return 3;
+        }
+        if (sign) {
+            memcpy(buf, "-Inf", 5);
+            return 4;
+        }
+        memcpy(buf, "Inf", 4);
+        return 3;
+    }
+    if (ieee_exp == 0 && ieee_mant == 0) {
+        if (sign) {
+            memcpy(buf, "-0", 3);
+            return 2;
+        }
+        memcpy(buf, "0", 2);
+        return 1;
+    }
+
+    int32_t e2;
+    uint64_t m2;
+    if (ieee_exp == 0) {
+        e2 = 1 - 1023 - 52 - 2;
+        m2 = ieee_mant;
+    } else {
+        e2 = (int32_t)ieee_exp - 1023 - 52 - 2;
+        m2 = (UINT64_C(1) << 52) | ieee_mant;
+    }
+
+    int even = ((m2 & 1u) == 0);
+    int accept_bounds = even;
+
+    uint64_t mv = 4u * m2;
+    uint32_t mm_shift = (ieee_mant != 0 || ieee_exp <= 1) ? 1u : 0u;
+
+    uint64_t vr, vp, vm;
+    int32_t e10;
+    int vm_is_trailing_zeros = 0;
+    int vr_is_trailing_zeros = 0;
+
+    if (e2 >= 0) {
+        uint32_t q = (uint32_t)mt_ryu_log10_pow2(e2) - (e2 > 3 ? 1u : 0u);
+        e10 = (int32_t)q;
+        int32_t k = MT_RYU_POW5_INV_BITCOUNT + (int32_t)mt_ryu_pow5bits((int32_t)q) - 1;
+        int32_t i = -e2 + (int32_t)q + k;
+        vr = mt_ryu_mulshift_all64(m2, mt_ryu_pow5_inv_split[q], i, &vp, &vm, mm_shift);
+        if (q <= 21u) {
+            if (mv % 5u == 0) {
+                vr_is_trailing_zeros = mt_ryu_multiple_of_pow5(mv, q);
+            } else if (accept_bounds) {
+                vm_is_trailing_zeros = mt_ryu_multiple_of_pow5(mv - 1u - mm_shift, q);
+            } else {
+                vp -= (uint64_t)mt_ryu_multiple_of_pow5(mv + 2u, q);
+            }
+        }
+    } else {
+        uint32_t q = (uint32_t)mt_ryu_log10_pow5(-e2) - (-e2 > 1 ? 1u : 0u);
+        e10 = (int32_t)q + e2;
+        int32_t i = -e2 - (int32_t)q;
+        int32_t k = (int32_t)mt_ryu_pow5bits(i) - MT_RYU_POW5_BITCOUNT;
+        int32_t j = (int32_t)q - k;
+        vr = mt_ryu_mulshift_all64(m2, mt_ryu_pow5_split[i], j, &vp, &vm, mm_shift);
+        if (q <= 1u) {
+            vr_is_trailing_zeros = 1;
+            if (accept_bounds) {
+                vm_is_trailing_zeros = (mm_shift == 1u);
+            } else {
+                vp--;
+            }
+        } else if (q < 63u) {
+            vr_is_trailing_zeros = mt_ryu_multiple_of_pow2(mv, q - 1u);
+        }
+    }
+
+    int32_t removed = 0;
+    uint8_t last_removed_digit = 0;
+    uint64_t output;
+
+    if (vm_is_trailing_zeros || vr_is_trailing_zeros) {
+        for (;;) {
+            uint64_t vp_div10 = vp / 10u;
+            uint64_t vm_div10 = vm / 10u;
+            if (vp_div10 <= vm_div10) break;
+            uint32_t vm_mod10 = (uint32_t)(vm % 10u);
+            uint64_t vr_div10 = vr / 10u;
+            uint32_t vr_mod10 = (uint32_t)(vr % 10u);
+            vm_is_trailing_zeros &= (vm_mod10 == 0);
+            vr_is_trailing_zeros &= (last_removed_digit == 0);
+            last_removed_digit = (uint8_t)vr_mod10;
+            vr = vr_div10;
+            vp = vp_div10;
+            vm = vm_div10;
+            removed++;
+        }
+        if (vm_is_trailing_zeros) {
+            for (;;) {
+                uint64_t vm_div10 = vm / 10u;
+                uint32_t vm_mod10 = (uint32_t)(vm % 10u);
+                if (vm_mod10 != 0) break;
+                uint64_t vp_div10 = vp / 10u;
+                uint64_t vr_div10 = vr / 10u;
+                uint32_t vr_mod10 = (uint32_t)(vr % 10u);
+                vr_is_trailing_zeros &= (last_removed_digit == 0);
+                last_removed_digit = (uint8_t)vr_mod10;
+                vr = vr_div10;
+                vp = vp_div10;
+                vm = vm_div10;
+                removed++;
+            }
+        }
+        if (vr_is_trailing_zeros && last_removed_digit == 5 && (vr & 1u) == 0) {
+            last_removed_digit = 4;
+        }
+        output = vr + ((vr == vm && (!accept_bounds || !vm_is_trailing_zeros)) ||
+                       last_removed_digit >= 5 ? 1u : 0u);
+    } else {
+        int round_up = 0;
+        uint64_t vp_div100 = vp / 100u;
+        uint64_t vm_div100 = vm / 100u;
+        if (vp_div100 > vm_div100) {
+            uint64_t vr_div100 = vr / 100u;
+            uint32_t vr_mod100 = (uint32_t)(vr % 100u);
+            round_up = (vr_mod100 >= 50u);
+            vr = vr_div100;
+            vp = vp_div100;
+            vm = vm_div100;
+            removed += 2;
+        }
+        for (;;) {
+            uint64_t vp_div10 = vp / 10u;
+            uint64_t vm_div10 = vm / 10u;
+            if (vp_div10 <= vm_div10) break;
+            uint64_t vr_div10 = vr / 10u;
+            uint32_t vr_mod10 = (uint32_t)(vr % 10u);
+            round_up = (vr_mod10 >= 5u);
+            vr = vr_div10;
+            vp = vp_div10;
+            vm = vm_div10;
+            removed++;
+        }
+        output = vr + ((vr == vm || round_up) ? 1u : 0u);
+    }
+
+    int32_t exp = e10 + removed;
+
+    /* Extract decimal digits of output (at most 17 digits). */
+    char digits[24];
+    int nd = 0;
+    uint64_t tmp = output;
+    while (tmp > 0) {
+        digits[nd++] = (char)('0' + (tmp % 10u));
+        tmp /= 10u;
+    }
+    /* Reverse digits into forward order. */
+    for (int l = 0, r = nd - 1; l < r; l++, r--) {
+        char c = digits[l];
+        digits[l] = digits[r];
+        digits[r] = c;
+    }
+    /* Trim any trailing zeros that appeared after rounding up. */
+    while (nd > 1 && digits[nd - 1] == '0') {
+        nd--;
+        exp++;
+    }
+
+    int32_t sci_exp = exp + nd - 1;
+    char *p = buf;
+    if (sign) *p++ = '-';
+
+    /* Plain decimal formatting for moderate exponents [-4, 15). */
+    if (sci_exp >= -4 && sci_exp < 15) {
+        if (sci_exp >= 0) {
+            int int_digits = sci_exp + 1;
+            if (int_digits >= nd) {
+                memcpy(p, digits, (size_t)nd);
+                p += nd;
+                for (int k = nd; k < int_digits; k++) *p++ = '0';
+            } else {
+                memcpy(p, digits, (size_t)int_digits);
+                p += int_digits;
+                *p++ = '.';
+                memcpy(p, digits + int_digits, (size_t)(nd - int_digits));
+                p += (nd - int_digits);
+            }
+        } else {
+            *p++ = '0';
+            *p++ = '.';
+            for (int k = 0; k < -sci_exp - 1; k++) *p++ = '0';
+            memcpy(p, digits, (size_t)nd);
+            p += nd;
+        }
+    } else {
+        /* Scientific notation: d.dddde+XX */
+        *p++ = digits[0];
+        if (nd > 1) {
+            *p++ = '.';
+            memcpy(p, digits + 1, (size_t)(nd - 1));
+            p += (nd - 1);
+        }
+        *p++ = 'e';
+        int32_t ae = sci_exp;
+        if (ae < 0) {
+            *p++ = '-';
+            ae = -ae;
+        } else {
+            *p++ = '+';
+        }
+        if (ae >= 100) {
+            *p++ = (char)('0' + (ae / 100));
+            ae %= 100;
+            *p++ = (char)('0' + (ae / 10));
+            *p++ = (char)('0' + (ae % 10));
+        } else {
+            *p++ = (char)('0' + (ae / 10));
+            *p++ = (char)('0' + (ae % 10));
+        }
+    }
+
+    *p = '\0';
+    return (size_t)(p - buf);
+}
+
+#endif /* MT_CORE_MATH_RYU_H */

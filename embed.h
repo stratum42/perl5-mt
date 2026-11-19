@@ -178,6 +178,8 @@
 # define cop_fetch_label(a,b,c)                 Perl_cop_fetch_label(aTHX_ a,b,c)
 # define cop_store_label(a,b,c,d)               Perl_cop_store_label(aTHX_ a,b,c,d)
 # define croak_memory_wrap                      Perl_croak_memory_wrap
+# define croak_mt(a)                            Perl_croak_mt(aTHX_ a)
+# define croak_mt_nocontext                     Perl_croak_mt_nocontext
 # define croak_no_modify                        Perl_croak_no_modify
 # define croak_sv(a)                            Perl_croak_sv(aTHX_ a)
 # define croak_xs_usage                         Perl_croak_xs_usage
@@ -236,6 +238,7 @@
 # define foldEQ_utf8_flags(a,b,c,d,e,f,g,h,i)   Perl_foldEQ_utf8_flags(aTHX_ a,b,c,d,e,f,g,h,i)
 # define forbid_outofblock_ops(a,b)             Perl_forbid_outofblock_ops(aTHX_ a,b)
 # define free_tmps()                            Perl_free_tmps(aTHX)
+# define freeze_boot_image()                    Perl_freeze_boot_image(aTHX)
 # define get_av(a,b)                            Perl_get_av(aTHX_ a,b)
 # define get_cv(a,b)                            Perl_get_cv(aTHX_ a,b)
 # define get_cvn_flags(a,b,c)                   Perl_get_cvn_flags(aTHX_ a,b,c)
@@ -365,6 +368,35 @@
 # define mro_get_linear_isa(a)                  Perl_mro_get_linear_isa(aTHX_ a)
 # define mro_method_changed_in(a)               Perl_mro_method_changed_in(aTHX_ a)
 # define msbit_pos32                            Perl_msbit_pos32
+# define mt_cap_count(a)                        Perl_mt_cap_count(aTHX_ a)
+# define mt_cap_drop(a)                         Perl_mt_cap_drop(aTHX_ a)
+# define mt_cap_get(a)                          Perl_mt_cap_get(aTHX_ a)
+# define mt_cap_handle_new(a,b)                 Perl_mt_cap_handle_new(aTHX_ a,b)
+# define mt_cap_is_handle(a)                    Perl_mt_cap_is_handle(aTHX_ a)
+# define mt_cap_mint(a)                         Perl_mt_cap_mint(aTHX_ a)
+# define mt_cap_reap()                          Perl_mt_cap_reap(aTHX)
+# define mt_cap_share(a,b,c)                    Perl_mt_cap_share(aTHX_ a,b,c)
+# define mt_cv_depth_p                          Perl_mt_cv_depth_p
+# define mt_cv_shareable                        Perl_mt_cv_shareable
+# define mt_err_msg                             Perl_mt_err_msg
+# define mt_err_name                            Perl_mt_err_name
+# define mt_gvflags_p                           Perl_mt_gvflags_p
+# define mt_gvgp                                Perl_mt_gvgp
+# define mt_gvgp_set                            Perl_mt_gvgp_set
+# define mt_hv_amagic_nocontext                 Perl_mt_hv_amagic_nocontext
+# define mt_hv_amagic_set_nocontext             Perl_mt_hv_amagic_set_nocontext
+# define mt_hv_aux_nocontext                    Perl_mt_hv_aux_nocontext
+# define mt_padlist_p                           Perl_mt_padlist_p
+# define mt_regex_materialize(a)                Perl_mt_regex_materialize(aTHX_ a)
+# define mt_sv_is_shared_kind                   Perl_mt_sv_is_shared_kind
+# define mt_value_free                          Perl_mt_value_free
+# define mt_value_from_sv(a,b)                  Perl_mt_value_from_sv(aTHX_ a,b)
+# define mt_value_to_sv(a)                      Perl_mt_value_to_sv(aTHX_ a)
+# define mt_worker_join(a)                      Perl_mt_worker_join(aTHX_ a)
+# define mt_worker_spawn(a,b,c)                 Perl_mt_worker_spawn(aTHX_ a,b,c)
+# define mt_xs_dl_find_symbol(a,b,c,d)          Perl_mt_xs_dl_find_symbol(aTHX_ a,b,c,d)
+# define mt_xs_dl_lib_new(a,b)                  Perl_mt_xs_dl_lib_new(aTHX_ a,b)
+# define mt_xs_dl_unload(a)                     Perl_mt_xs_dl_unload(aTHX_ a)
 # define my_atof(a)                             Perl_my_atof(aTHX_ a)
 # define my_atof3(a,b,c)                        Perl_my_atof3(aTHX_ a,b,c)
 # define my_dirfd                               Perl_my_dirfd
@@ -914,6 +946,7 @@
 #   define boot_core_UNIVERSAL()                Perl_boot_core_UNIVERSAL(aTHX)
 #   define boot_core_builtin()                  Perl_boot_core_builtin(aTHX)
 #   define boot_core_mro()                      Perl_boot_core_mro(aTHX)
+#   define boot_core_mt()                       Perl_boot_core_mt(aTHX)
 #   define build_infix_plugin(a,b,c)            Perl_build_infix_plugin(aTHX_ a,b,c)
 #   define cando(a,b,c)                         Perl_cando(aTHX_ a,b,c)
 #   define check_utf8_print(a,b)                Perl_check_utf8_print(aTHX_ a,b)
@@ -997,10 +1030,12 @@
 #   define magic_clearpack(a,b)                 Perl_magic_clearpack(aTHX_ a,b)
 #   define magic_clearsig(a,b)                  Perl_magic_clearsig(aTHX_ a,b)
 #   define magic_copycallchecker(a,b,c,d,e)     Perl_magic_copycallchecker(aTHX_ a,b,c,d,e)
+#   define magic_dupmtcap(a,b)                  Perl_magic_dupmtcap(aTHX_ a,b)
 #   define magic_existspack(a,b)                Perl_magic_existspack(aTHX_ a,b)
 #   define magic_freearylen_p(a,b)              Perl_magic_freearylen_p(aTHX_ a,b)
 #   define magic_freedestruct(a,b)              Perl_magic_freedestruct(aTHX_ a,b)
 #   define magic_freemglob(a,b)                 Perl_magic_freemglob(aTHX_ a,b)
+#   define magic_freemtcap(a,b)                 Perl_magic_freemtcap(aTHX_ a,b)
 #   define magic_freeovrld(a,b)                 Perl_magic_freeovrld(aTHX_ a,b)
 #   define magic_freeutf8(a,b)                  Perl_magic_freeutf8(aTHX_ a,b)
 #   define magic_get(a,b)                       Perl_magic_get(aTHX_ a,b)
@@ -1051,6 +1086,104 @@
 #   define mode_from_discipline(a,b)            Perl_mode_from_discipline(aTHX_ a,b)
 #   define mro_isa_changed_in(a)                Perl_mro_isa_changed_in(aTHX_ a)
 #   define mro_package_moved(a,b,c,d)           Perl_mro_package_moved(aTHX_ a,b,c,d)
+#   define mt_aio_destroy()                     Perl_mt_aio_destroy(aTHX)
+#   define mt_aio_drain_completions(a)          Perl_mt_aio_drain_completions(aTHX_ a)
+#   define mt_aio_reset()                       Perl_mt_aio_reset(aTHX)
+#   define mt_aio_run(a)                        Perl_mt_aio_run(aTHX_ a)
+#   define mt_arena_alloc                       Perl_mt_arena_alloc
+#   define mt_arena_contains                    Perl_mt_arena_contains
+#   define mt_arena_create(a)                   Perl_mt_arena_create(aTHX_ a)
+#   define mt_arena_size                        Perl_mt_arena_size
+#   define mt_boot_cap()                        Perl_mt_boot_cap(aTHX)
+#   define mt_boot_chan()                       Perl_mt_boot_chan(aTHX)
+#   define mt_boot_fiber()                      Perl_mt_boot_fiber(aTHX)
+#   define mt_boot_io()                         Perl_mt_boot_io(aTHX)
+#   define mt_boot_worker()                     Perl_mt_boot_worker(aTHX)
+#   define mt_boot_xs()                         Perl_mt_boot_xs(aTHX)
+#   define mt_cap_init()                        Perl_mt_cap_init(aTHX)
+#   define mt_cap_stats()                       Perl_mt_cap_stats(aTHX)
+#   define mt_cap_worker_exit()                 Perl_mt_cap_worker_exit(aTHX)
+#   define mt_cap_worker_start()                Perl_mt_cap_worker_start(aTHX)
+#   define mt_chan_drain(a)                     Perl_mt_chan_drain(aTHX_ a)
+#   define mt_chan_idle_wait()                  Perl_mt_chan_idle_wait(aTHX)
+#   define mt_ctx_shstk_active                  Perl_mt_ctx_shstk_active
+#   define mt_fiber_destroy()                   Perl_mt_fiber_destroy(aTHX)
+#   define mt_fiber_init()                      Perl_mt_fiber_init(aTHX)
+#   define mt_fiber_resume(a)                   Perl_mt_fiber_resume(aTHX_ a)
+#   define mt_fiber_yield()                     Perl_mt_fiber_yield(aTHX)
+#   define mt_gp_materialize(a)                 Perl_mt_gp_materialize(aTHX_ a)
+#   define mt_gp_release(a)                     Perl_mt_gp_release(aTHX_ a)
+#   define mt_gv_init_private(a,b,c,d,e)        Perl_mt_gv_init_private(aTHX_ a,b,c,d,e)
+#   define mt_hv_aux(a)                         Perl_mt_hv_aux(aTHX_ a)
+#   define mt_hv_common_immortal(a,b,c,d,e,f,g,h) Perl_mt_hv_common_immortal(aTHX_ a,b,c,d,e,f,g,h)
+#   define mt_image_stats()                     Perl_mt_image_stats(aTHX)
+#   define mt_padlist_free(a)                   Perl_mt_padlist_free(aTHX_ a)
+#   define mt_padlist_materialize(a)            Perl_mt_padlist_materialize(aTHX_ a)
+#   define mt_sched_arm()                       Perl_mt_sched_arm(aTHX)
+#   define mt_sched_idle()                      Perl_mt_sched_idle(aTHX)
+#   define mt_sched_park()                      Perl_mt_sched_park(aTHX)
+#   define mt_sched_pass()                      Perl_mt_sched_pass(aTHX)
+#   define mt_sched_poll()                      Perl_mt_sched_poll(aTHX)
+#   define mt_sched_ready(a)                    Perl_mt_sched_ready(aTHX_ a)
+#   define mt_sched_run()                       Perl_mt_sched_run(aTHX)
+#   define mt_sched_wake(a)                     Perl_mt_sched_wake(aTHX_ a)
+#   define mt_stash_amt(a)                      Perl_mt_stash_amt(aTHX_ a)
+#   define mt_stash_amt_remove(a)               Perl_mt_stash_amt_remove(aTHX_ a)
+#   define mt_stash_amt_set(a,b,c)              Perl_mt_stash_amt_set(aTHX_ a,b,c)
+#   define mt_worker_join_all()                 Perl_mt_worker_join_all(aTHX)
+#   define mt_worker_tables_free(a)             Perl_mt_worker_tables_free(aTHX_ a)
+#   define mt_worker_tables_init(a)             Perl_mt_worker_tables_init(aTHX_ a)
+#   define mt_worker_tables_release()           Perl_mt_worker_tables_release(aTHX)
+#   define mt_xs_affinity()                     Perl_mt_xs_affinity(aTHX)
+#   define mt_xs_arena_alloc(a,b,c)             Perl_mt_xs_arena_alloc(aTHX_ a,b,c)
+#   define mt_xs_arena_at(a,b,c)                Perl_mt_xs_arena_at(aTHX_ a,b,c)
+#   define mt_xs_arena_full(a)                  Perl_mt_xs_arena_full(aTHX_ a)
+#   define mt_xs_arena_reset(a)                 Perl_mt_xs_arena_reset(aTHX_ a)
+#   define mt_xs_bell(a)                        Perl_mt_xs_bell(aTHX_ a)
+#   define mt_xs_bell_changed(a)                Perl_mt_xs_bell_changed(aTHX_ a)
+#   define mt_xs_bell_wait(a,b)                 Perl_mt_xs_bell_wait(aTHX_ a,b)
+#   define mt_xs_bind_comp()                    Perl_mt_xs_bind_comp(aTHX)
+#   define mt_xs_boot_bridge()                  Perl_mt_xs_boot_bridge(aTHX)
+#   define mt_xs_boot_wrapper(a)                Perl_mt_xs_boot_wrapper(aTHX_ a)
+#   define mt_xs_comp_alive(a,b)                Perl_mt_xs_comp_alive(aTHX_ a,b)
+#   define mt_xs_comp_count()                   Perl_mt_xs_comp_count(aTHX)
+#   define mt_xs_comp_gen(a)                    Perl_mt_xs_comp_gen(aTHX_ a)
+#   define mt_xs_comp_serve(a)                  Perl_mt_xs_comp_serve(aTHX_ a)
+#   define mt_xs_comp_wait_cb(a,b,c)            Perl_mt_xs_comp_wait_cb(aTHX_ a,b,c)
+#   define mt_xs_drain(a)                       Perl_mt_xs_drain(aTHX_ a)
+#   define mt_xs_export_sv(a,b)                 Perl_mt_xs_export_sv(aTHX_ a,b)
+#   define mt_xs_exported_sv(a)                 Perl_mt_xs_exported_sv(aTHX_ a)
+#   define mt_xs_handle_free(a)                 Perl_mt_xs_handle_free(aTHX_ a)
+#   define mt_xs_handle_new(a,b,c,d,e,f,g,h,i)  Perl_mt_xs_handle_new(aTHX_ a,b,c,d,e,f,g,h,i)
+#   define mt_xs_handle_ref(a)                  Perl_mt_xs_handle_ref(aTHX_ a)
+#   define mt_xs_host_callback(a,b)             Perl_mt_xs_host_callback(aTHX_ a,b)
+#   define mt_xs_host_handles_free()            Perl_mt_xs_host_handles_free(aTHX)
+#   define mt_xs_host_hrel(a)                   Perl_mt_xs_host_hrel(aTHX_ a)
+#   define mt_xs_in_call_depth(a)               Perl_mt_xs_in_call_depth(aTHX_ a)
+#   define mt_xs_in_call_enter(a)               Perl_mt_xs_in_call_enter(aTHX_ a)
+#   define mt_xs_in_call_leave(a)               Perl_mt_xs_in_call_leave(aTHX_ a)
+#   define mt_xs_in_compartment                 Perl_mt_xs_in_compartment
+#   define mt_xs_inflight_max()                 Perl_mt_xs_inflight_max(aTHX)
+#   define mt_xs_install_boot(a,b,c)            Perl_mt_xs_install_boot(aTHX_ a,b,c)
+#   define mt_xs_install_stub(a,b,c,d,e,f,g,h)  Perl_mt_xs_install_stub(aTHX_ a,b,c,d,e,f,g,h)
+#   define mt_xs_log_newxs(a)                   Perl_mt_xs_log_newxs(aTHX_ a)
+#   define mt_xs_my_comp                        Perl_mt_xs_my_comp
+#   define mt_xs_my_gen                         Perl_mt_xs_my_gen
+#   define mt_xs_next_seq(a)                    Perl_mt_xs_next_seq(aTHX_ a)
+#   define mt_xs_pool_start()                   Perl_mt_xs_pool_start(aTHX)
+#   define mt_xs_pool_stop()                    Perl_mt_xs_pool_stop(aTHX)
+#   define mt_xs_post(a,b)                      Perl_mt_xs_post(aTHX_ a,b)
+#   define mt_xs_register_xsub(a,b)             Perl_mt_xs_register_xsub(aTHX_ a,b)
+#   define mt_xs_remote_call(a)                 Perl_mt_xs_remote_call(aTHX_ a)
+#   define mt_xs_remote_load(a,b,c)             Perl_mt_xs_remote_load(aTHX_ a,b,c)
+#   define mt_xs_remote_load_in(a,b,c,d)        Perl_mt_xs_remote_load_in(aTHX_ a,b,c,d)
+#   define mt_xs_reply(a)                       Perl_mt_xs_reply(aTHX_ a)
+#   define mt_xs_reply_die_pv(a,b,c)            Perl_mt_xs_reply_die_pv(aTHX_ a,b,c)
+#   define mt_xs_slot()                         Perl_mt_xs_slot(aTHX)
+#   define mt_xs_slot_release()                 Perl_mt_xs_slot_release(aTHX)
+#   define mt_xs_slot_waiting(a)                Perl_mt_xs_slot_waiting(aTHX_ a)
+#   define mt_xs_unexport(a)                    Perl_mt_xs_unexport(aTHX_ a)
+#   define mt_xs_wait(a,b,c,d)                  Perl_mt_xs_wait(aTHX_ a,b,c,d)
 #   define my_attrs(a,b)                        Perl_my_attrs(aTHX_ a,b)
 #   define my_clearenv()                        Perl_my_clearenv(aTHX)
 #   define my_lstat_flags(a)                    Perl_my_lstat_flags(aTHX_ a)
@@ -1113,6 +1246,7 @@
 #   define setfd_inhexec_for_sysfd(a)           Perl_setfd_inhexec_for_sysfd(aTHX_ a)
 #   define sighandler1                          Perl_sighandler1
 #   define sighandler3                          Perl_sighandler3
+#   define simd_detect()                        Perl_simd_detect(aTHX)
 #   define sub_crush_depth(a)                   Perl_sub_crush_depth(aTHX_ a)
 #   define sv_2num(a)                           Perl_sv_2num(aTHX_ a)
 #   define sv_clean_all()                       Perl_sv_clean_all(aTHX)
@@ -1136,6 +1270,8 @@
 #   define yyparse(a)                           Perl_yyparse(aTHX_ a)
 #   define yyquit()                             Perl_yyquit(aTHX)
 #   define yyunlex()                            Perl_yyunlex(aTHX)
+#   define Slab_to_ro(a)                        Perl_Slab_to_ro(aTHX_ a)
+#   define Slab_to_rw(a)                        Perl_Slab_to_rw(aTHX_ a)
 #   define opslab_force_free(a)                 Perl_opslab_force_free(aTHX_ a)
 #   define opslab_free(a)                       Perl_opslab_free(aTHX_ a)
 #   define opslab_free_nopad(a)                 Perl_opslab_free_nopad(aTHX_ a)
@@ -1188,10 +1324,6 @@
 #   endif
 #   if defined(PERL_DEBUG_READONLY_COW)
 #     define sv_buf_to_ro(a)                    Perl_sv_buf_to_ro(aTHX_ a)
-#   endif
-#   if defined(PERL_DEBUG_READONLY_OPS)
-#     define Slab_to_ro(a)                      Perl_Slab_to_ro(aTHX_ a)
-#     define Slab_to_rw(a)                      Perl_Slab_to_rw(aTHX_ a)
 #   endif
 #   if !defined(PERL_DEFAULT_DO_EXEC3_IMPLEMENTATION)
 #     define do_exec(a)                         Perl_do_exec(aTHX_ a)
@@ -1277,6 +1409,7 @@
 #     define do_trans_count_invmap(a,b)         S_do_trans_count_invmap(aTHX_ a,b)
 #     define do_trans_invmap(a,b)               S_do_trans_invmap(aTHX_ a,b)
 #     define do_trans_simple(a,b)               S_do_trans_simple(aTHX_ a,b)
+#     define tr_range_of(a,b,c,d)               S_tr_range_of(aTHX_ a,b,c,d)
 #   endif
 #   if defined(PERL_IN_DUMP_C)
 #     define deb_curcv(a)                       S_deb_curcv(aTHX_ a)
@@ -2118,6 +2251,9 @@
 #   define mem_log_free                         Perl_mem_log_free
 #   define mem_log_new_sv                       Perl_mem_log_new_sv
 #   define mem_log_realloc                      Perl_mem_log_realloc
+# endif
+# if defined(PERL_MT_DEBUG_IMMORTAL)
+#   define mt_check_immortal                    Perl_mt_check_immortal
 # endif
 # if !defined(PERL_NO_INLINE_FUNCTIONS)
 #   define cx_popblock(a)                       Perl_cx_popblock(aTHX_ a)

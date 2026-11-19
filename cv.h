@@ -57,13 +57,19 @@ See L<perlguts/Autoloading with XSUBs>.
 #endif
 #define CvFILEGV(sv)	(gv_fetchfile(CvFILE(sv)))
 #define CvDEPTH(sv)	(*Perl_CvDEPTH((const CV *)sv))
+/* perl5-mt: the CV's index in the boot image (see xcv_mt_id in sv.h) */
+#define CvMTID(sv)	(((XPVCV*)MUTABLE_PTR(SvANY(sv)))->xcv_mt_id)
 /* For use when you only have a XPVCV*, not a real CV*.
    Must be assert protected as in Perl_CvDEPTH before use. */
 #define CvDEPTHunsafe(sv) ((XPVCV*)MUTABLE_PTR(SvANY(sv)))->xcv_depth
 
-/* these CvPADLIST/CvRESERVED asserts can be reverted one day, once stabilized */
-#define CvPADLIST(sv)	  (*(assert_(!CvISXSUB((CV*)(sv))) \
-        &(((XPVCV*)MUTABLE_PTR(SvANY(sv)))->xcv_padlist_u.xcv_padlist)))
+/* these CvPADLIST/CvRESERVED asserts can be reverted one day, once stabilized.
+ * perl5-mt: an immortal CV (a member of the boot image) has its padlist in
+ * the per-worker table instead; Perl_CvPADLISTp (inline.h) is the single
+ * choke point, as Perl_CvDEPTH is for the recursion depth. */
+#define CvPADLIST(sv)	  (*Perl_CvPADLISTp((const CV *)(sv)))
+/* the raw field: the template padlist of an immortal CV */
+#define CvPADLIST_raw(sv) (((XPVCV*)MUTABLE_PTR(SvANY(sv)))->xcv_padlist_u.xcv_padlist)
 /* CvPADLIST_set is not public API, it can be removed one day, once stabilized */
 #ifdef DEBUGGING
 #  define CvPADLIST_set(sv, padlist) Perl_set_padlist((CV*)sv, padlist)
@@ -140,6 +146,13 @@ See L<perlguts/Autoloading with XSUBs>.
                                    CVf_METHOD; now CVf_NOWARN_AMBIGUOUS */
 #define CVf_XS_RCSTACK  0x200000 /* the XS function understands a
                                     reference-counted stack */
+/* perl5-mt: the two-tier XS dispatcher */
+#define CVf_MT_THREADSAFE 0x400000 /* XSUB from a module built with
+                                      PERL_XS_THREADSAFE: safe to call in
+                                      every worker in-process */
+#define CVf_MT_REMOTE   0x800000 /* host stub for an XSUB that lives in an
+                                    XS compartment: Perl_rpp_invoke_xs
+                                    routes the call to mt_xs_remote_call */
 
 /* This symbol for optimised communication between toke.c and op.c: */
 #define CVf_BUILTIN_ATTRS	(CVf_NOWARN_AMBIGUOUS|CVf_LVALUE|CVf_ANONCONST)
@@ -265,6 +278,12 @@ Helper macro to turn off the C<CvREFCOUNTED_ANYSV> flag.
 #define CvXS_RCSTACK(cv)        (CvFLAGS(cv) & CVf_XS_RCSTACK)
 #define CvXS_RCSTACK_on(cv)     (CvFLAGS(cv) |= CVf_XS_RCSTACK)
 #define CvXS_RCSTACK_off(cv)    (CvFLAGS(cv) &= ~CVf_XS_RCSTACK)
+
+#define CvMT_THREADSAFE(cv)     (CvFLAGS(cv) & CVf_MT_THREADSAFE)
+#define CvMT_THREADSAFE_on(cv)  (CvFLAGS(cv) |= CVf_MT_THREADSAFE)
+#define CvMT_REMOTE(cv)         (CvFLAGS(cv) & CVf_MT_REMOTE)
+#define CvMT_REMOTE_on(cv)      (CvFLAGS(cv) |= CVf_MT_REMOTE)
+#define CvMT_REMOTE_off(cv)     (CvFLAGS(cv) &= ~CVf_MT_REMOTE)
 
 /* Back-compat */
 #ifndef PERL_CORE

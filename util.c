@@ -25,6 +25,7 @@
 #define PERL_IN_UTIL_C
 #include "perl.h"
 #include "reentr.h"
+#include "core-math/mt_ryu.h"
 
 #if defined(USE_PERLIO)
 #include "perliol.h" /* For PerlIOUnix_refcnt */
@@ -136,6 +137,13 @@ Perl_safesysmalloc(MEM_SIZE size)
     dTHX;
 #endif
     Malloc_t ptr;
+
+    /* perl5-mt: the clone that becomes the boot image is built here (the
+     * parent keeps allocating from the heap while perl_clone runs code in
+     * its context) */
+    if (UNLIKELY(PL_mt_arena_mode) && PERL_GET_THX != PL_mt_arena_exclude
+        && (ptr = Perl_mt_arena_alloc(size)))
+        return ptr;
     dSAVEDERRNO;
 
 #ifdef USE_MDH
@@ -225,6 +233,17 @@ Perl_safesysrealloc(Malloc_t where,MEM_SIZE size)
     dTHX;
 #endif
     Malloc_t ptr;
+
+    /* perl5-mt: arena memory is never given back; move the data instead */
+    if (UNLIKELY(PL_mt_arena.base != NULL) && where
+        && Perl_mt_arena_contains(where)) {
+        const MEM_SIZE oldsize = Perl_mt_arena_size(where);
+        if (!size)
+            return NULL;
+        ptr = safesysmalloc(size);
+        Copy(where, ptr, oldsize < size ? oldsize : size, char);
+        return ptr;
+    }
 #ifdef PERL_DEBUG_READONLY_COW
     const MEM_SIZE oldsize = where
         ? ((struct perl_memory_debug_header *)((char *)where - PERL_MEMORY_DEBUG_HEADER_SIZE))->size
@@ -360,6 +379,10 @@ Perl_safesysfree(Malloc_t where)
 #ifdef ALWAYS_NEED_THX
     dTHX;
 #endif
+    /* perl5-mt: arena memory is never given back (and is sealed) */
+    if (UNLIKELY(PL_mt_arena.base != NULL) && where
+        && Perl_mt_arena_contains(where))
+        return;
     DEBUG_m( PerlIO_printf(Perl_debug_log, "0x%" UVxf ": (%05ld) free\n",PTR2UV(where),(long)PL_an++));
     if (where) {
 #ifdef USE_MDH
@@ -432,6 +455,14 @@ Perl_safesyscalloc(MEM_SIZE count, MEM_SIZE size)
     dTHX;
 #endif
     Malloc_t ptr;
+
+    /* perl5-mt: see Perl_safesysmalloc */
+    if (UNLIKELY(PL_mt_arena_mode) && PERL_GET_THX != PL_mt_arena_exclude
+        && size && count <= MEM_SIZE_MAX / size
+        && (ptr = Perl_mt_arena_alloc(size * count))) {
+        Zero(ptr, size * count, char);
+        return ptr;
+    }
 #if defined(USE_MDH) || defined(DEBUGGING)
     MEM_SIZE total_size = 0;
 #endif
@@ -1972,6 +2003,101 @@ Perl_croak_no_modify(void)
 {
     Perl_croak_nocontext( "%s", PL_no_modify);
 }
+
+/* perl5-mt --------------------------------------------------------------- */
+
+struct perl_mt_err_desc { const char *name; const char *msg; };
+
+static const struct perl_mt_err_desc S_mt_err_table[] = {
+#define PERL_MT_ERR_ROW(name, msg) { #name, msg },
+    PERL_MT_ERR_LIST(PERL_MT_ERR_ROW)
+#undef PERL_MT_ERR_ROW
+};
+
+/*
+=for apidoc mt_err_name
+
+Returns the symbolic name (C<"MT_IMMORTAL_MUTATION"> ...) of a perl5-mt
+error code from F<mt_err.h>, or C<"MT_UNKNOWN"> for an out-of-range code.
+
+=for apidoc mt_err_msg
+
+Returns the human-readable message for a perl5-mt error code.
+
+=cut
+*/
+
+const char *
+Perl_mt_err_name(int code)
+{
+    if (code < 0 || code >= MT_ERR_MAX)
+        return "MT_UNKNOWN";
+    return S_mt_err_table[code].name;
+}
+
+const char *
+Perl_mt_err_msg(int code)
+{
+    if (code < 0 || code >= MT_ERR_MAX)
+        return "unknown perl5-mt error";
+    return S_mt_err_table[code].msg;
+}
+
+/*
+=for apidoc croak_mt
+
+Dies with the message for the perl5-mt error C<code> (one of the C<MT_*>
+constants in F<mt_err.h>).  The message has the form
+C<< perl5-mt: <message> (<MT_NAME>) >> so that both the text and the
+symbolic name can be matched.
+
+=for apidoc croak_mt_nocontext
+
+As L</croak_mt>, for callers without an interpreter context (used by the
+C<SvREADONLY_off> and C<SvSHARE> guards, which may run in XS code without
+C<aTHX>).
+
+=cut
+*/
+
+void
+Perl_croak_mt(pTHX_ int code)
+{
+    Perl_croak(aTHX_ "perl5-mt: %s (%s)",
+               Perl_mt_err_msg(code), Perl_mt_err_name(code));
+}
+
+void
+Perl_croak_mt_nocontext(int code)
+{
+    dTHX;
+    Perl_croak_mt(aTHX_ code);
+}
+
+#ifdef PERL_MT_DEBUG_IMMORTAL
+/* Debugging aid for the reference-count guards: returns true when sv
+ * carries SVf_IMMORTAL, after verifying that it really is one of the
+ * process-global immortals (or, later, a member of the boot image).  An
+ * SV that merely has the bit set is dumped and the process aborts. */
+bool
+Perl_mt_check_immortal(const SV *sv)
+{
+    PERL_ARGS_ASSERT_MT_CHECK_IMMORTAL;
+    if (LIKELY(!(SvFLAGS(sv) & SVf_IMMORTAL)))
+        return FALSE;
+    if (SvIMMORTAL_INTERP(sv))
+        return TRUE;
+    {
+        dTHX;
+        if (sv == &PL_sv_placeholder)
+            return TRUE;
+        PerlIO_printf(Perl_debug_log,
+                      "perl5-mt: SVf_IMMORTAL set on a non-immortal SV\n");
+        Perl_sv_dump(aTHX_ (SV *)sv);
+        abort();
+    }
+}
+#endif
 
 /* does not return, used in util.c perlio.c and win32.c
    This is typically called when malloc returns NULL.
@@ -4556,8 +4682,10 @@ potentially warn under some level of strict-ness.
 void
 Perl_sv_nosharing(pTHX_ SV *sv)
 {
+    /* perl5-mt: immortals may not be shared (their heads are read-only) */
+    if (sv && (SvFLAGS(sv) & SVf_IMMORTAL))
+        Perl_croak_mt(aTHX_ MT_IMMORTAL_MUTATION);
     PERL_UNUSED_CONTEXT;
-    PERL_UNUSED_ARG(sv);
 }
 
 /*
@@ -5507,6 +5635,30 @@ Perl_my_cxt_init(pTHX_ int *indexp, size_t size)
     p = (void*)SvPVX(newSV(size-1));
     PL_my_cxt_list[index] = p;
     Zero(p, size, char);
+
+    /* perl5-mt: a module that keeps per-interpreter state here and is
+     * booted in the main interpreter before the freeze lands in the image;
+     * unless it has a CLONE method (replayed in every worker) the workers
+     * would write to the sealed copy, so the freeze checks the list */
+    if (PL_mt_boot_pkg && PL_mt_worker_id == 0 && !PL_mt_image) {
+        U32 i;
+        bool seen = FALSE;
+        MUTEX_LOCK(&PL_my_ctx_mutex);
+        for (i = 0; i < PL_mt_my_cxt_npkgs; i++)
+            if (strEQ(PL_mt_my_cxt_pkgs[i], PL_mt_boot_pkg)) {
+                seen = TRUE;
+                break;
+            }
+        if (!seen) {
+            PL_mt_my_cxt_pkgs = (char **)PerlMemShared_realloc(
+                PL_mt_my_cxt_pkgs, (PL_mt_my_cxt_npkgs + 1) * sizeof(char *));
+            PL_mt_my_cxt_pkgs[PL_mt_my_cxt_npkgs] =
+                (char *)PerlMemShared_malloc(strlen(PL_mt_boot_pkg) + 1);
+            strcpy(PL_mt_my_cxt_pkgs[PL_mt_my_cxt_npkgs], PL_mt_boot_pkg);
+            PL_mt_my_cxt_npkgs++;
+        }
+        MUTEX_UNLOCK(&PL_my_ctx_mutex);
+    }
     return p;
 }
 
@@ -6766,6 +6918,19 @@ Perl_dtrace_probe_phase(pTHX_ enum perl_phase phase)
 }
 
 #endif
+
+int
+Perl_mt_nv_shortest_enabled(void)
+{
+    const char *env = getenv("PERL_NV_SHORTEST");
+    return (env != NULL && env[0] == '1' && env[1] == '\0') ? 1 : 0;
+}
+
+size_t
+Perl_mt_nv_ryu_format(double nv, char *buf, size_t size)
+{
+    return mt_ryu_d2s(nv, buf, size);
+}
 
 /*
  * ex: set ts=8 sts=4 sw=4 et:

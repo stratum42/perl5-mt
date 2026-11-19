@@ -1376,7 +1376,19 @@ runnm=''
 usenm=''
 usensgetexecutablepath=''
 useperlio=''
+usepgo=''
 usequadmath=''
+usenative=''
+usesymbolbinding=''
+usehugepagetext=''
+pgo_compiler=''
+pgo_gen_flags=''
+pgo_use_flags=''
+pgo_lto_flags=''
+native_cflags=''
+symbind_cflags=''
+symbind_ldflags=''
+hugepage_ldflags=''
 usesocks=''
 d_oldpthreads=''
 useithreads=''
@@ -7140,6 +7152,30 @@ fi
 case "$usequadmath" in
 "$define"|true|[yY]*) usequadmath="$define" ;;
 *)                    usequadmath="$undef"  ;;
+esac
+
+: Check if PGO, native tuning, symbol binding, or hugepage text are requested
+case "$usepgo" in
+"$define"|true|[yY]*) usepgo="$define" ;;
+*)                    usepgo="$undef"  ;;
+esac
+case "$usenative" in
+"$define"|true|[yY]*) usenative="$define" ;;
+*)                    usenative="$undef"  ;;
+esac
+case "$usesymbolbinding" in
+"$define"|true|[yY]*) usesymbolbinding="$define" ;;
+"$undef"|false|[nN]*) usesymbolbinding="$undef"  ;;
+*)
+	case "$usepgo" in
+	"$define") usesymbolbinding="$define" ;;
+	*)         usesymbolbinding="$undef"  ;;
+	esac
+	;;
+esac
+case "$usehugepagetext" in
+"$define"|true|[yY]*) usehugepagetext="$define" ;;
+*)                    usehugepagetext="$undef"  ;;
 esac
 
 : Fail if both uselongdouble and usequadmath are requested
@@ -24768,6 +24804,214 @@ case "$cppstdin" in
 esac
 cd UU
 
+: Probe build optimisation flags for -Dusepgo, -Dusenative, -Dusesymbolbinding, -Dusehugepagetext
+case "$usepgo:$usenative:$usesymbolbinding:$usehugepagetext" in
+*"$define"*)
+	echo " "
+	echo "Checking build optimisation flags..." >&4
+	$cat >try.c <<'EOCP'
+#include <stdio.h>
+int main(void) { return 0; }
+EOCP
+	case "$usepgo" in
+	"$define")
+		case "$gccversion:$cc" in
+		*Clang*|*LLVM*|*:*clang*)
+			pgo_compiler='clang'
+			pgo_gen_flags='-fprofile-instr-generate'
+			pgo_use_flags='-fprofile-instr-use=pgo-prof/default.profdata'
+			_lto_candidates='-flto=thin -flto'
+			;;
+		*)
+			pgo_compiler='gcc'
+			pgo_gen_flags='-fprofile-generate=pgo-prof'
+			pgo_use_flags='-fprofile-use=pgo-prof -fprofile-correction'
+			_lto_candidates='-flto=auto -flto'
+			;;
+		esac
+		case " $optimize " in
+		*" -O3 "*) ;;
+		*" -O2 "*) optimize=`echo " $optimize " | $sed -e 's/ -O2 / -O3 /' -e 's/^ //' -e 's/ $//'` ;;
+		*" -O "*)  optimize=`echo " $optimize " | $sed -e 's/ -O / -O3 /' -e 's/^ //' -e 's/ $//'` ;;
+		*)         optimize="-O3 $optimize" ;;
+		esac
+		case " $optimize " in
+		*" -g "*) ;;
+		*)        optimize="$optimize -g" ;;
+		esac
+		pgo_lto_flags=''
+		for _f in $_lto_candidates; do
+			$rm -f try$_exe
+			_out=`$cc $ccflags $_f try.c -o try$_exe 2>&1`
+			case "$_out" in
+			*unrecognized*|*unknown*|*unsupported*|*"not supported"*|*ignored*) ;;
+			*)
+				if $test -x try$_exe; then
+					pgo_lto_flags="$_f"
+					break
+				fi
+				;;
+			esac
+		done
+		case "$pgo_lto_flags" in
+		'') ;;
+		*)
+			echo "Using LTO flag $pgo_lto_flags for PGO build." >&4
+			case " $ldflags " in
+			*" $pgo_lto_flags "*) ;;
+			*) ldflags="$ldflags $pgo_lto_flags" ;;
+			esac
+			case "$osname" in
+			darwin)
+				case " $ldflags " in
+				*" -Wl,-export_dynamic "*) ;;
+				*) ldflags="$ldflags -Wl,-export_dynamic" ;;
+				esac
+				;;
+			esac
+			;;
+		esac
+		;;
+	esac
+
+	case "$usenative" in
+	"$define")
+		case "$osname:$archname" in
+		darwin:*arm64*|darwin:*aarch64*)
+			_native_candidates='-mcpu=native -march=native -mcpu=apple-m3 -mcpu=apple-m1'
+			;;
+		*:*ppc64*|*:*powerpc64*)
+			_native_candidates='-mcpu=native -march=native -mcpu=power8'
+			;;
+		*)
+			_native_candidates='-march=native -mcpu=native'
+			;;
+		esac
+		native_cflags=''
+		for _f in $_native_candidates; do
+			$rm -f try$_exe
+			_out=`$cc $ccflags $_f try.c -o try$_exe 2>&1`
+			case "$_out" in
+			*unrecognized*|*unknown*|*unsupported*|*"not supported"*|*ignored*|*invalid*) ;;
+			*)
+				if $test -x try$_exe; then
+					native_cflags="$_f"
+					break
+				fi
+				;;
+			esac
+		done
+		case "$native_cflags" in
+		'') echo "Warning: no native CPU tuning flag supported by $cc." >&4 ;;
+		*)  echo "Using native CPU tuning flag: $native_cflags" >&4 ;;
+		esac
+		;;
+	esac
+
+	case "$usesymbolbinding" in
+	"$define")
+		symbind_cflags=''
+		symbind_ldflags=''
+		case "$osname" in
+		linux|freebsd|netbsd|openbsd|dragonfly|gnu)
+			_sb_cc_candidates='-fno-semantic-interposition -fno-plt'
+			_sb_ld_candidates='-Wl,-Bsymbolic-functions'
+			;;
+		*)
+			_sb_cc_candidates='-fno-semantic-interposition'
+			_sb_ld_candidates=''
+			;;
+		esac
+		for _f in $_sb_cc_candidates; do
+			$rm -f try$_exe
+			_out=`$cc $ccflags $_f try.c -o try$_exe 2>&1`
+			case "$_out" in
+			*unrecognized*|*unknown*|*unsupported*|*"not supported"*|*ignored*|*unused*) ;;
+			*)
+				if $test -x try$_exe; then
+					case "$symbind_cflags" in
+					'') symbind_cflags="$_f" ;;
+					*)  symbind_cflags="$symbind_cflags $_f" ;;
+					esac
+				fi
+				;;
+			esac
+		done
+		for _f in $_sb_ld_candidates; do
+			$rm -f try$_exe
+			_out=`$cc $ccflags $ldflags $_f try.c -o try$_exe 2>&1`
+			case "$_out" in
+			*unrecognized*|*unknown*|*unsupported*|*"not supported"*|*ignored*) ;;
+			*)
+				if $test -x try$_exe; then
+					case "$symbind_ldflags" in
+					'') symbind_ldflags="$_f" ;;
+					*)  symbind_ldflags="$symbind_ldflags $_f" ;;
+					esac
+					case " $ldflags " in
+					*" $_f "*) ;;
+					*) ldflags="$ldflags $_f" ;;
+					esac
+					case " $lddlflags " in
+					*" $_f "*) ;;
+					*) lddlflags="$lddlflags $_f" ;;
+					esac
+				fi
+				;;
+			esac
+		done
+		case "$symbind_cflags$symbind_ldflags" in
+		'') ;;
+		*) echo "Using symbol-binding flags: cc='$symbind_cflags' ld='$symbind_ldflags'" >&4 ;;
+		esac
+		;;
+	esac
+
+	case "$usehugepagetext" in
+	"$define")
+		hugepage_ldflags=''
+		case "$osname" in
+		linux)
+			for _f in '-Wl,-z,max-page-size=0x200000' '-Wl,-z,common-page-size=0x200000'; do
+				$rm -f try$_exe
+				_out=`$cc $ccflags $ldflags $_f try.c -o try$_exe 2>&1`
+				case "$_out" in
+				*unrecognized*|*unknown*|*unsupported*|*"not supported"*|*ignored*) ;;
+				*)
+					if $test -x try$_exe; then
+						case "$hugepage_ldflags" in
+						'') hugepage_ldflags="$_f" ;;
+						*)  hugepage_ldflags="$hugepage_ldflags $_f" ;;
+						esac
+						case " $ldflags " in
+						*" $_f "*) ;;
+						*) ldflags="$ldflags $_f" ;;
+						esac
+					fi
+					;;
+				esac
+			done
+			case "$hugepage_ldflags" in
+			'') ;;
+			*)
+				echo "Using Linux 2 MiB hugepage text alignment: $hugepage_ldflags" >&4
+				case " $ccflags " in
+				*" -DPERL_MT_HUGEPAGE_TEXT "*) ;;
+				*) ccflags="$ccflags -DPERL_MT_HUGEPAGE_TEXT" ;;
+				esac
+				;;
+			esac
+			;;
+		*)
+			echo "Hugepage text alignment is Linux-only; skipping on $osname." >&4
+			;;
+		esac
+		;;
+	esac
+	$rm -f try.c try$_exe
+	;;
+esac
+
 : end of configuration questions
 echo " "
 echo "End of configuration questions."
@@ -25568,6 +25812,7 @@ hostcat='$hostcat'
 hostgenerate='$hostgenerate'
 hostosname='$hostosname'
 hostperl='$hostperl'
+hugepage_ldflags='$hugepage_ldflags'
 html1dir='$html1dir'
 html1direxp='$html1direxp'
 html3dir='$html3dir'
@@ -25771,6 +26016,7 @@ mydomain='$mydomain'
 myhostname='$myhostname'
 myuname='$myuname'
 n='$n'
+native_cflags='$native_cflags'
 need_va_copy='$need_va_copy'
 netdb_hlen_type='$netdb_hlen_type'
 netdb_host_type='$netdb_host_type'
@@ -25816,6 +26062,10 @@ perladmin='$perladmin'
 perllibs='$perllibs'
 perlpath='$perlpath'
 pg='$pg'
+pgo_compiler='$pgo_compiler'
+pgo_gen_flags='$pgo_gen_flags'
+pgo_lto_flags='$pgo_lto_flags'
+pgo_use_flags='$pgo_use_flags'
 phostname='$phostname'
 pidtype='$pidtype'
 plibpth='$plibpth'
@@ -25940,6 +26190,8 @@ stdio_stream_array='$stdio_stream_array'
 strerror_r_proto='$strerror_r_proto'
 submit='$submit'
 subversion='$subversion'
+symbind_cflags='$symbind_cflags'
+symbind_ldflags='$symbind_ldflags'
 sysman='$sysman'
 sysroot='$sysroot'
 tail='$tail'
@@ -25991,6 +26243,7 @@ usedevel='$usedevel'
 usedl='$usedl'
 usedtrace='$usedtrace'
 usefaststdio='$usefaststdio'
+usehugepagetext='$usehugepagetext'
 useithreads='$useithreads'
 usekernprocpathname='$usekernprocpathname'
 uselanginfo='$uselanginfo'
@@ -26000,10 +26253,12 @@ usemallocwrap='$usemallocwrap'
 usemorebits='$usemorebits'
 usemultiplicity='$usemultiplicity'
 usemymalloc='$usemymalloc'
+usenative='$usenative'
 usenm='$usenm'
 usensgetexecutablepath='$usensgetexecutablepath'
 useopcode='$useopcode'
 useperlio='$useperlio'
+usepgo='$usepgo'
 useposix='$useposix'
 usequadmath='$usequadmath'
 usereentrant='$usereentrant'
@@ -26011,6 +26266,7 @@ userelocatableinc='$userelocatableinc'
 useshrplib='$useshrplib'
 usesitecustomize='$usesitecustomize'
 usesocks='$usesocks'
+usesymbolbinding='$usesymbolbinding'
 usethreads='$usethreads'
 usevendorprefix='$usevendorprefix'
 useversionedarchname='$useversionedarchname'

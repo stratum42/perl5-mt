@@ -594,7 +594,10 @@ Perl_mro_isa_changed_in(pTHX_ HV* stash)
                 revmeta->cache_gen++;
             if(revmeta->mro_nextmethod)
                 hv_clear(revmeta->mro_nextmethod);
-            if (!SvOBJECT(revstash)) SvSTASH(revstash) = NULL;
+            /* perl5-mt: a subclass in the sealed image keeps its head; its
+             * mro meta above is this worker's own copy */
+            if (!SvOBJECT(revstash) && !(SvFLAGS(revstash) & SVf_IMMORTAL))
+                SvSTASH(revstash) = NULL;
 
             (void)
               hv_store(

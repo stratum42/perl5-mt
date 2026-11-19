@@ -35,6 +35,53 @@
  * be in the to-translate set
  */
 
+/* perl5-mt: the byte map of tbl moves one contiguous range of bytes
+ * [*lo, *hi] by one constant *delta, and leaves every other byte alone.  Such a
+ * map (tr/a-z/A-Z/ is one) is applied by perl_simd_tr_range.  Any other map,
+ * the identity included, is not, and returns FALSE. */
+STATIC bool
+S_tr_range_of(pTHX_ const OPtrans_map * const tbl, U8 *lo, U8 *hi, U8 *delta)
+{
+    int c, first = -1, last = -1;
+
+    PERL_ARGS_ASSERT_TR_RANGE_OF;
+
+    if (tbl->size < 256) {
+        return FALSE;
+    }
+
+    for (c = 0; c < 256; c++) {
+        if (tbl->map[c] >= 0) {
+            if (first < 0) {
+                first = c;
+            }
+            last = c;
+        }
+    }
+    if (first < 0) {
+        return FALSE;
+    }
+
+    for (c = 0; c < 256; c++) {
+        if (c < first || c > last) {
+            if (tbl->map[c] >= 0) {
+                return FALSE;
+            }
+        }
+        else if (tbl->map[c] < 0 || tbl->map[c] > 255
+                 || (U8) (tbl->map[c] - c) != (U8) (tbl->map[first] - first))
+        {
+            return FALSE;
+        }
+    }
+
+    *lo = (U8) first;
+    *hi = (U8) last;
+    *delta = (U8) (tbl->map[first] - first);
+    return TRUE;
+}
+
+
 STATIC Size_t
 S_do_trans_simple(pTHX_ SV * const sv, const OPtrans_map * const tbl)
 {
@@ -51,13 +98,25 @@ S_do_trans_simple(pTHX_ SV * const sv, const OPtrans_map * const tbl)
 
     /* First, take care of non-UTF-8 input strings, because they're easy */
     if (!SvUTF8(sv)) {
-        while (s < send) {
-            const short ch = tbl->map[*s];
-            if (ch >= 0) {
-                matches++;
-                *s = (U8)ch;
+        U8 lo, hi, delta;
+
+        /* perl5-mt: a map that moves one range of bytes by one delta
+         * (tr/a-z/A-Z/ is one) runs as a SIMD loop */
+        if (PERL_SIMD_ON() && len >= PERL_SIMD_MIN_LEN
+            && S_tr_range_of(aTHX_ tbl, &lo, &hi, &delta))
+        {
+            matches = PERL_SIMD_DISPATCH(perl_simd_tr_range, s, len, lo, hi,
+                                         delta);
+        }
+        else {
+            while (s < send) {
+                const short ch = tbl->map[*s];
+                if (ch >= 0) {
+                    matches++;
+                    *s = (U8)ch;
+                }
+                s++;
             }
-            s++;
         }
         SvSETMAGIC(sv);
     }
